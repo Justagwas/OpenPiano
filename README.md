@@ -47,7 +47,7 @@ It is built for fast local workflows: audition SoundFonts, rehearse phrases, and
 
 ## Basic usage
 
-1. Download and install OpenPiano from the Windows release link above.
+1. Download and install OpenPiano from the [latest Windows release](https://github.com/Justagwas/OpenPiano/releases/latest/download/OpenPianoSetup.exe).
 2. Launch the app and pick a keyboard layout (`61-key` or `88-key`).
 3. Choose an input method (QWERTY keyboard, mouse, or MIDI device).
 4. Select a SoundFont/instrument, then play.
@@ -80,7 +80,6 @@ Use SoundFonts to change tone instantly while keeping the same play workflow.
 
 - Supports `.sf2` and `.sf3` instruments
 - Bank and preset selection for compatible SoundFonts
-- Bundled fonts are available in `OpenPiano/fonts`
 
 ## Recording and MIDI Export
 
@@ -91,7 +90,7 @@ Record takes directly in the app and export standard MIDI files.
 
 ## Configuration
 
-OpenPiano persists app settings in `OpenPiano_config.json`.
+OpenPiano persists app settings in [`OpenPiano_config.json`](https://github.com/Justagwas/OpenPiano/blob/main/OpenPiano/OpenPiano_config.json).
 
 Save location behavior:
 
@@ -105,19 +104,17 @@ Save location behavior:
 
 ## Preview
 
-- Project page with full preview gallery: `https://www.justagwas.com/projects/openpiano`
-- Download page and release details: `https://www.justagwas.com/projects/openpiano/download`
+- Project page with full preview gallery: [justagwas.com/projects/openpiano](https://www.justagwas.com/projects/openpiano)
+- OpenPiano Installer Download link: [justagwas.com/projects/openpiano/download](https://www.justagwas.com/projects/openpiano/download)
 
 <details>
 <summary>For Developers</summary>
 
 ### Requirements
 
-- Windows 10/11
 - Python 3.11+
-- `pip`
 
-Main dependencies are managed in `OpenPiano/requirements.txt` (`PySide6`, `pyfluidsynth`, `mido`, `python-rtmidi`).
+Main dependencies are managed in [`OpenPiano/requirements.txt`](https://github.com/Justagwas/OpenPiano/blob/main/OpenPiano/requirements.txt) (`PySide6`, `pyfluidsynth`, `mido`, `python-rtmidi`).
 
 ### Running From Source
 
@@ -144,16 +141,16 @@ py -m unittest discover -s tests -p "test_*.py" -v
 
 ```powershell
 cd OpenPiano
-py -m PyInstaller OpenPiano.spec
+py -m PyInstaller -F -w --name OpenPiano --icon icon.ico --clean --add-data "icon.ico;." --add-binary "third_party\fluidsynth\bin\*;third_party\fluidsynth\bin" --hidden-import fluidsynth --hidden-import mido --hidden-import mido.backends.rtmidi --hidden-import rtmidi --exclude-module numpy OpenPiano.py
 ```
 
 Build artifacts are produced in `OpenPiano/dist/`.
 
 ### Configuration Files (developer-relevant)
 
-- Runtime settings: `OpenPiano_config.json`
-- App constants and URLs: `OpenPiano/openpiano/core/config.py`
-- Packaging spec: `OpenPiano/OpenPiano.spec`
+- Runtime settings: [`OpenPiano_config.json`](https://github.com/Justagwas/OpenPiano/blob/main/OpenPiano/OpenPiano_config.json)
+- App constants and URLs: [`OpenPiano/openpiano/core/config.py`](https://github.com/Justagwas/OpenPiano/blob/main/OpenPiano/openpiano/core/config.py)
+- Build/runtime assets: [`OpenPiano/icon.ico`](https://github.com/Justagwas/OpenPiano/blob/main/OpenPiano/icon.ico), [`OpenPiano/third_party/fluidsynth/bin/`](https://github.com/Justagwas/OpenPiano/tree/main/OpenPiano/third_party/fluidsynth/bin)
 
 </details>
 
@@ -162,18 +159,18 @@ Build artifacts are produced in `OpenPiano/dist/`.
 - OpenPiano is open source and intended for local desktop use.
 - Windows SmartScreen may display "Protected your PC" for newer/unsigned binaries.
 - Only run installers downloaded from official OpenPiano release links.
-- For private vulnerability reporting, follow `.github/SECURITY.md`.
+- For private vulnerability reporting, follow [`.github/SECURITY.md`](https://github.com/Justagwas/OpenPiano/blob/main/.github/SECURITY.md).
 
 ## Contributing
 
 Contributions are welcome.
 
-Please read `.github/CONTRIBUTING.md` before opening issues or pull requests.
+Please read [`.github/CONTRIBUTING.md`](https://github.com/Justagwas/OpenPiano/blob/main/.github/CONTRIBUTING.md) before opening issues or pull requests.
 
 ## License
 
-Apache License 2.0. See `LICENSE`.
+Apache License 2.0. See [`LICENSE`](https://github.com/Justagwas/OpenPiano/blob/main/LICENSE).
 
 ## Contact
 
-`email@justagwas.com`
+[email@justagwas.com](mailto:email@justagwas.com)
