@@ -168,4 +168,5 @@ Apache License 2.0. See [`LICENSE`](https://github.com/Justagwas/OpenPiano/blob/
 
 ## Contact
 
-[email@justagwas.com](mailto:email@justagwas.com)
+- Email: [email@justagwas.com](mailto:email@justagwas.com)
+- Website: <https://www.justagwas.com/projects/openpiano>
