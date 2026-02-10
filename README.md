@@ -26,7 +26,7 @@
 </p>
 
 <p align="center">
-  <a href="https://Justagwas.com/projects/OpenPiano">Website</a>
+  <a href="https://Justagwas.com/projects/openpiano">Website</a>
   &nbsp;•&nbsp;
   <a href="https://github.com/Justagwas/OpenPiano/releases">Releases</a>
   &nbsp;•&nbsp;
@@ -43,15 +43,18 @@
 
 OpenPiano is a Windows desktop piano app that lets you play and practice using your PC keyboard, mouse, or a MIDI controller.
 
-It is built for fast local workflows: audition SoundFonts, rehearse phrases, and export MIDI takes without cloud accounts or online dependencies.
+It is built to be lightweight and non-dependent on cloud accounts or online dependencies.
 
 ## Basic usage
 
 1. Download and install OpenPiano from the [latest Windows release](https://github.com/Justagwas/OpenPiano/releases/latest/download/OpenPianoSetup.exe).
-2. Launch the app and pick a keyboard layout (`61-key` or `88-key`).
-3. Choose an input method (QWERTY keyboard, mouse, or MIDI device).
-4. Select a SoundFont/instrument, then play.
-5. Optionally record a take and export it as `.mid`.
+2. Launch the app and play.  
+Optionally:
+1. Check out the `Tutorial`.
+2. Pick a keyboard layout (`61-key` or `88-key`).  
+3. PLay with either form: keyboard, mouse, or MIDI device.  
+4. Change the SoundFont/instrument. 
+5. Record a take and export it as `.mid`.  
 
 ## Features
 
@@ -64,13 +67,12 @@ It is built for fast local workflows: audition SoundFonts, rehearse phrases, and
 - MIDI recording and `.mid` export
 - Stats display (KPS, held keys, polyphony, transpose, sustain)
 - Theme, UI scale, animation speed, and key color customization
-- Built-in update checking
 
 ## Input Methods
 
 OpenPiano supports three input paths in the same session:
 
-- `Keyboard`: play directly from QWERTY when no external controller is connected.
+- `Keyboard`: play directly with your keyboard when no external controller is connected.
 - `Mouse`: click and drag on keys for quick testing and note checks.
 - `MIDI`: connect a MIDI keyboard/device and select it in the input dropdown.
 
@@ -128,13 +130,6 @@ If your environment has resolver issues, install core packages directly:
 
 ```powershell
 py -m pip install PySide6 pyfluidsynth mido python-rtmidi
-```
-
-### Testing (optional)
-
-```powershell
-cd OpenPiano
-py -m unittest discover -s tests -p "test_*.py" -v
 ```
 
 ### Build (optional)
