@@ -361,6 +361,7 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+
 # OpenPiano build artifacts and local runtime files
 /OpenPiano/dist
 /OpenPiano/build
