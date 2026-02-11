@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Literal
 
 APP_NAME = "OpenPiano"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 OFFICIAL_WEBSITE_URL = "https://www.justagwas.com/projects/openpiano"
 
 UPDATE_CHECK_MANIFEST_URL = "https://www.justagwas.com/projects/openpiano/latest.json"
