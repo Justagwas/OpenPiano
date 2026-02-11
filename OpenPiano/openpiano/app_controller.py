@@ -1215,6 +1215,30 @@ class PianoAppController(QObject):
         self._release_note_source(sounding, source)
         self._mark_stats_dirty()
 
+    @staticmethod
+    def _is_descendant_of(child: object, ancestor: object) -> bool:
+        current = child
+        while current is not None:
+            if current is ancestor:
+                return True
+            parent_getter = getattr(current, "parent", None)
+            if not callable(parent_getter):
+                return False
+            current = parent_getter()
+        return False
+
+    def _is_main_window_key_context(self, watched: QObject) -> bool:
+        if watched is self.window or watched is self.window.piano_widget:
+            return True
+        if self._is_descendant_of(watched, self.window):
+            return True
+        focus = QApplication.focusWidget()
+        if focus is None:
+            return False
+        if focus is self.window or focus is self.window.piano_widget:
+            return True
+        return self._is_descendant_of(focus, self.window)
+
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:              
         if watched is self.window and event.type() == QEvent.Close:
             self.shutdown()
@@ -1229,10 +1253,14 @@ class PianoAppController(QObject):
             return False
 
         if event.type() == QEvent.KeyPress:
+            if not self._is_main_window_key_context(watched):
+                return super().eventFilter(watched, event)
             key_event = event                            
             if isinstance(key_event, QKeyEvent):
                 return self._handle_key_press_event(key_event)
         if event.type() == QEvent.KeyRelease:
+            if not self._is_main_window_key_context(watched):
+                return super().eventFilter(watched, event)
             key_event = event                            
             if isinstance(key_event, QKeyEvent):
                 return self._handle_key_release_event(key_event)

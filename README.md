@@ -27,13 +27,13 @@
 
 <p align="center">
   <a href="https://Justagwas.com/projects/openpiano">Website</a>
-  &nbsp;•&nbsp;
+  &nbsp;&bull;&nbsp;
   <a href="https://github.com/Justagwas/OpenPiano/releases">Releases</a>
-  &nbsp;•&nbsp;
+  &nbsp;&bull;&nbsp;
   <a href="https://github.com/Justagwas/OpenPiano/issues">Issues</a>
-  &nbsp;•&nbsp;
+  &nbsp;&bull;&nbsp;
   <a href="https://github.com/Justagwas/OpenPiano/wiki">Documentation</a>
-  &nbsp;•&nbsp;
+  &nbsp;&bull;&nbsp;
   <a href="https://github.com/Justagwas/OpenPiano/blob/main/LICENSE">License</a>
 </p>
 

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, Signal, QTimer
-from PySide6.QtGui import QColor, QGuiApplication, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QGuiApplication, QIcon, QPainter, QPalette, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QListView,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -28,7 +29,9 @@ from PySide6.QtWidgets import (
     QStyle,
     QStyleOptionButton,
     QStyleOptionComboBox,
+    QStyleOptionViewItem,
     QStyleOptionSlider,
+    QStyledItemDelegate,
     QProxyStyle,
     QVBoxLayout,
     QWidget,
@@ -271,6 +274,80 @@ class SquareCheckBoxStyle(QProxyStyle):
         painter.restore()
 
 
+class ComboPopupDelegate(QStyledItemDelegate):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        palette = parent.palette() if isinstance(parent, QWidget) else QApplication.palette()
+        self._accent = QColor("#D20F39")
+        self._text_color = QColor(palette.color(QPalette.Text))
+        self._panel_bg = QColor(palette.color(QPalette.Base))
+        hover_candidate = QColor(palette.color(QPalette.AlternateBase))
+        self._hover_bg = hover_candidate if hover_candidate.isValid() else QColor(self._panel_bg).darker(108)
+        self._selected_bg = QColor(self._accent)
+        self._selected_bg.setAlpha(42)
+
+    def set_colors(self, *, accent: str, text: str, panel: str, hover: str) -> None:
+        self._accent = QColor(accent)
+        self._text_color = QColor(text)
+        self._panel_bg = QColor(panel)
+        self._hover_bg = QColor(hover)
+        self._selected_bg = QColor(accent)
+        self._selected_bg.setAlpha(42)
+
+    def paint(self, painter, option, index) -> None:                          
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        rect = opt.rect
+        if not rect.isValid():
+            return
+
+        state = opt.state
+        is_selected = bool(state & QStyle.StateFlag.State_Selected)
+        is_hovered = bool(state & QStyle.StateFlag.State_MouseOver)
+        is_enabled = bool(state & QStyle.StateFlag.State_Enabled)
+
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setPen(Qt.NoPen)
+        if is_selected:
+            painter.setBrush(self._selected_bg)
+        elif is_hovered:
+            painter.setBrush(self._hover_bg)
+        else:
+            painter.setBrush(self._panel_bg)
+        painter.drawRect(rect)
+
+        left_pad = 8
+        if is_selected:
+            marker_width = max(3, int(round(rect.height() * 0.10)))
+            marker_rect = QRect(
+                int(rect.left() + 2),
+                int(rect.top() + 4),
+                marker_width,
+                max(2, int(rect.height() - 8)),
+            )
+            painter.setBrush(self._accent)
+            painter.drawRoundedRect(QRectF(marker_rect), marker_width / 2.0, marker_width / 2.0)
+            left_pad += marker_width + 5
+
+        text_rect = rect.adjusted(left_pad, 0, -6, 0)
+        text_color = QColor(self._text_color)
+        if not is_enabled:
+            text_color.setAlpha(145)
+        painter.setPen(text_color)
+        font = opt.font
+        font.setBold(True)
+        painter.setFont(font)
+        text = opt.fontMetrics.elidedText(str(opt.text or ""), Qt.TextElideMode.ElideRight, max(1, text_rect.width()))
+        painter.drawText(text_rect, int(Qt.AlignVCenter | Qt.AlignLeft), text)
+        painter.restore()
+
+    def sizeHint(self, option, index):                          
+        hint = super().sizeHint(option, index)
+        hint.setHeight(max(24, hint.height()))
+        return hint
+
+
 class ChevronComboBox(QComboBox):
     popupAboutToShow = Signal()
 
@@ -278,11 +355,36 @@ class ChevronComboBox(QComboBox):
         super().__init__(parent)
         self._arrow_idle = QColor("#B7B7BC")
         self._arrow_active = QColor("#F4F4F5")
+        self._popup_delegate = ComboPopupDelegate(self)
+        popup_view = QListView(self)
+        popup_view.setUniformItemSizes(True)
+        popup_view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        popup_view.setMouseTracking(True)
+        if popup_view.viewport() is not None:
+            popup_view.viewport().setAutoFillBackground(True)
+            popup_view.viewport().setMouseTracking(True)
+        popup_view.setItemDelegate(self._popup_delegate)
+        self.setView(popup_view)
 
     def set_arrow_colors(self, idle: str, active: str) -> None:
         self._arrow_idle = QColor(idle)
         self._arrow_active = QColor(active)
         self.update()
+
+    def set_popup_colors(self, *, accent: str, text: str, panel: str, hover: str) -> None:
+        self._popup_delegate.set_colors(accent=accent, text=text, panel=panel, hover=hover)
+        view = self.view()
+        if view is None:
+            return
+        palette = view.palette()
+        palette.setColor(QPalette.Base, QColor(panel))
+        palette.setColor(QPalette.Text, QColor(text))
+        palette.setColor(QPalette.Highlight, QColor(accent))
+        palette.setColor(QPalette.HighlightedText, QColor(text))
+        view.setPalette(palette)
+        if view.viewport() is not None:
+            view.viewport().setPalette(palette)
+            view.viewport().update()
 
     def paintEvent(self, event) -> None:                          
         super().paintEvent(event)
@@ -1061,17 +1163,30 @@ class MainWindow(QMainWindow):
     def _set_interaction_cursors(self) -> None:
         self.piano_widget.setFocusPolicy(Qt.StrongFocus)
         for button in self.findChildren(QPushButton):
-            button.setCursor(Qt.PointingHandCursor)
+            self._set_widget_cursor(button)
             button.setFocusPolicy(Qt.NoFocus)
         for combo in self.findChildren(QComboBox):
-            combo.setCursor(Qt.PointingHandCursor)
+            self._set_widget_cursor(combo)
             combo.setFocusPolicy(Qt.NoFocus)
+            view = combo.view()
+            if view is not None:
+                self._set_widget_cursor(view)
+                viewport = view.viewport()
+                if viewport is not None:
+                    self._set_widget_cursor(viewport)
         for checkbox in self.findChildren(QCheckBox):
-            checkbox.setCursor(Qt.PointingHandCursor)
+            self._set_widget_cursor(checkbox)
             checkbox.setFocusPolicy(Qt.NoFocus)
         for slider in self.findChildren(QSlider):
-            slider.setCursor(Qt.PointingHandCursor)
+            self._set_widget_cursor(slider)
             slider.setFocusPolicy(Qt.NoFocus)
+
+    @staticmethod
+    def _set_widget_cursor(widget: QWidget) -> None:
+        if widget.isEnabled() and widget.isVisible():
+            widget.setCursor(Qt.PointingHandCursor)
+        else:
+            widget.unsetCursor()
 
     def _install_wheel_guards(self) -> None:
         self.installEventFilter(self)
@@ -1116,7 +1231,7 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _is_interactive_control(watched: object) -> bool:
-        return isinstance(watched, (QComboBox, QSlider, QCheckBox))
+        return isinstance(watched, (QPushButton, QComboBox, QSlider, QCheckBox))
 
     @staticmethod
     def _scroll_area_by_wheel(scroll_area: QScrollArea, delta_y: int) -> None:
@@ -1132,6 +1247,19 @@ class MainWindow(QMainWindow):
         bar.setValue(bar.value() - amount)
 
     def eventFilter(self, watched, event):                          
+        if event.type() in {
+            QEvent.EnabledChange,
+            QEvent.Show,
+            QEvent.Hide,
+            QEvent.Enter,
+            QEvent.HoverEnter,
+            QEvent.HoverMove,
+            QEvent.StyleChange,
+            QEvent.Polish,
+        }:
+            if isinstance(watched, QWidget) and self._is_interactive_control(watched):
+                self._set_widget_cursor(watched)
+
         if self._tutorial_mode and not self._is_tutorial_descendant(watched):
             if event.type() in {
                 QEvent.MouseButtonPress,
@@ -1433,8 +1561,16 @@ class MainWindow(QMainWindow):
         self._refresh_key_color_buttons()
         self._refresh_slider_style_colors()
         self._refresh_checkbox_style_colors()
+        hover = QColor(self.theme.border)
+        hover = hover.lighter(128) if self._theme_mode == "dark" else hover.darker(108)
         for combo in self.findChildren(ChevronComboBox):
             combo.set_arrow_colors(self.theme.text_secondary, self.theme.text_primary)
+            combo.set_popup_colors(
+                accent=self.theme.accent,
+                text=self.theme.text_primary,
+                panel=self.theme.panel_bg,
+                hover=hover.name(),
+            )
         self.set_theme_mode(self._theme_mode)
         self._position_recording_indicator()
         overlay = getattr(self, "_tutorial_overlay", None)
