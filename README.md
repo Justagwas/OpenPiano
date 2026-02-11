@@ -52,7 +52,7 @@ It is built to be lightweight and non-dependent on cloud accounts or online depe
 Optionally:
 1. Check out the `Tutorial`.
 2. Pick a keyboard layout (`61-key` or `88-key`).  
-3. PLay with either form: keyboard, mouse, or MIDI device.  
+3. Play with either form: keyboard, mouse, or MIDI device.  
 4. Change the SoundFont/instrument. 
 5. Record a take and export it as `.mid`.  
 

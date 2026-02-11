@@ -1,12 +1,14 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, Signal, QTimer
 from PySide6.QtGui import QColor, QGuiApplication, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
+    QApplication,
     QButtonGroup,
     QCheckBox,
     QColorDialog,
@@ -1453,6 +1455,10 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._sync_all_notes_off_width)
         self._sync_tutorial_overlay()
 
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._apply_windows_title_bar_theme()
+
     def _on_mode_clicked(self, checked: bool, mode: str) -> None:
         if checked:
             self.modeChanged.emit(mode)
@@ -1545,6 +1551,7 @@ class MainWindow(QMainWindow):
             self,
             "Choose key color",
         )
+        self._restore_cursor_state_after_modal()
         if not color.isValid():
             return
         hex_color = color.name(QColor.HexRgb)
@@ -1561,15 +1568,130 @@ class MainWindow(QMainWindow):
         self.statsToggled.emit(not self._stats_visible)
 
     def _on_reset_defaults_clicked(self) -> None:
-        result = QMessageBox.question(
-            self,
+        if self.ask_yes_no(
             "Reset to Defaults",
             "Reset all settings to their default values?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        if result == QMessageBox.Yes:
+            default_yes=False,
+        ):
             self.resetDefaultsRequested.emit()
+
+    def _message_box_stylesheet(self) -> str:
+        button_font = self._sp(10)
+        return f"""
+            QMessageBox {{
+                background: {self.theme.panel_bg};
+            }}
+            QMessageBox QLabel {{
+                color: {self.theme.text_primary};
+                font: 600 {button_font}pt "Segoe UI";
+            }}
+            QMessageBox QPushButton {{
+                background: {self.theme.app_bg};
+                color: {self.theme.text_primary};
+                border: 1px solid {self.theme.border};
+                border-radius: 6px;
+                min-width: {self._sp(78)}px;
+                padding: {self._sp(4)}px {self._sp(10)}px;
+                font: 600 {button_font}pt "Segoe UI";
+            }}
+            QMessageBox QPushButton:hover {{
+                background: {self.theme.accent};
+                color: {self.theme.text_primary};
+            }}
+        """
+
+    def _show_themed_message(
+        self,
+        *,
+        icon: QMessageBox.Icon,
+        title: str,
+        text: str,
+        buttons: QMessageBox.StandardButtons = QMessageBox.Ok,
+        default_button: QMessageBox.StandardButton | None = None,
+    ) -> QMessageBox.StandardButton:
+        dialog = QMessageBox(self)
+        dialog.setIcon(icon)
+        dialog.setWindowTitle(title)
+        dialog.setText(str(text))
+        dialog.setTextFormat(Qt.PlainText)
+        dialog.setStandardButtons(buttons)
+        if default_button is not None:
+            dialog.setDefaultButton(default_button)
+        dialog.setStyleSheet(self._message_box_stylesheet())
+        self._apply_dialog_button_cursors(dialog)
+        self._apply_windows_title_bar_theme(dialog)
+        result = QMessageBox.StandardButton(dialog.exec())
+        self._restore_cursor_state_after_modal()
+        return result
+
+    @staticmethod
+    def _apply_dialog_button_cursors(dialog: QMessageBox) -> None:
+        for button in dialog.buttons():
+            button.setCursor(Qt.PointingHandCursor)
+
+    def _restore_cursor_state_after_modal_deferred(self) -> None:
+        while QApplication.overrideCursor() is not None:
+            QApplication.restoreOverrideCursor()
+        self.setCursor(Qt.ArrowCursor)
+        self.unsetCursor()
+        self._set_interaction_cursors()
+
+    def _restore_cursor_state_after_modal(self) -> None:
+        while QApplication.overrideCursor() is not None:
+            QApplication.restoreOverrideCursor()
+        self.setCursor(Qt.ArrowCursor)
+        self.unsetCursor()
+        self._set_interaction_cursors()
+        QTimer.singleShot(0, self._restore_cursor_state_after_modal_deferred)
+
+    def show_info(self, title: str, text: str) -> None:
+        self._show_themed_message(
+            icon=QMessageBox.Information,
+            title=title,
+            text=text,
+        )
+
+    def show_warning(self, title: str, text: str) -> None:
+        self._show_themed_message(
+            icon=QMessageBox.Warning,
+            title=title,
+            text=text,
+        )
+
+    def ask_yes_no(self, title: str, text: str, *, default_yes: bool = False) -> bool:
+        default_button = QMessageBox.Yes if default_yes else QMessageBox.No
+        response = self._show_themed_message(
+            icon=QMessageBox.Question,
+            title=title,
+            text=text,
+            buttons=QMessageBox.Yes | QMessageBox.No,
+            default_button=default_button,
+        )
+        return response == QMessageBox.Yes
+
+    def _apply_windows_title_bar_theme(self, target: QWidget | None = None) -> None:
+        if sys.platform != "win32":
+            return
+        widget = target or self
+        hwnd = int(widget.winId())
+        if hwnd <= 0:
+            return
+        use_dark_title_bar = 1 if self._theme_mode == "dark" else 0
+        try:
+            import ctypes
+
+            value = ctypes.c_int(use_dark_title_bar)
+            for attribute in (20, 19):  # DWMWA_USE_IMMERSIVE_DARK_MODE (newer, older)
+                result = ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    ctypes.c_void_p(hwnd),
+                    ctypes.c_uint(attribute),
+                    ctypes.byref(value),
+                    ctypes.sizeof(value),
+                )
+                if result == 0:
+                    break
+        except Exception:
+            return
 
     def set_theme(self, theme: ThemePalette) -> None:
         self.theme = theme
@@ -1721,6 +1843,7 @@ class MainWindow(QMainWindow):
     def set_theme_mode(self, mode: str) -> None:
         self._theme_mode = "light" if mode == "light" else "dark"
         if not hasattr(self, "theme_toggle_button"):
+            self._apply_windows_title_bar_theme()
             return
         icon_px = max(16, self._sp(18))
         self.theme_toggle_button.setIconSize(QSize(icon_px, icon_px))
@@ -1732,6 +1855,7 @@ class MainWindow(QMainWindow):
             self.theme_toggle_button.setText("")
             self.theme_toggle_button.setIcon(self._build_theme_icon("sun"))
             self.theme_toggle_button.setToolTip("Switch to dark mode")
+        self._apply_windows_title_bar_theme()
 
     def set_ui_scale(self, scale: float) -> None:
         clamped = max(0.50, min(2.00, float(scale)))

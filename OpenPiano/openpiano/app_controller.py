@@ -12,7 +12,7 @@ from typing import Callable
 
 from PySide6.QtCore import QEvent, QObject, QTimer, Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QKeyEvent
-from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
+from PySide6.QtWidgets import QApplication, QFileDialog
 
 from openpiano.core.audio_engine import AudioEngineProtocol, FluidSynthAudioEngine, SilentAudioEngine
 from openpiano.core.config import (
@@ -339,8 +339,7 @@ class PianoAppController(QObject):
                 self._schedule_persist()
             if not show_warning:
                 return
-            QMessageBox.warning(
-                self.window,
+            self.window.show_warning(
                 "MIDI Input",
                 f"Could not open MIDI input device:\n{exc}",
             )
@@ -355,8 +354,7 @@ class PianoAppController(QObject):
         if not detail:
             return
         self._midi_backend_issue_shown = True
-        QMessageBox.warning(
-            self.window,
+        self.window.show_warning(
             "MIDI Input",
             "MIDI input backend is unavailable.\n\n"
             f"{detail}\n\n"
@@ -494,8 +492,7 @@ class PianoAppController(QObject):
             programs = self.audio_engine.get_available_programs()
             current_bank, current_preset = self.audio_engine.get_current_program()
         except Exception as exc:
-            QMessageBox.warning(
-                self.window,
+            self.window.show_warning(
                 "Instrument Error",
                 f"Failed to load instrument:\n{exc}",
             )
@@ -749,7 +746,7 @@ class PianoAppController(QObject):
         if self._recorder.is_recording:
             return
         if not self._recorder.has_take():
-            QMessageBox.information(self.window, "Recording", "No recording available to save.")
+            self.window.show_info("Recording", "No recording available to save.")
             return
         path_text, _ = QFileDialog.getSaveFileName(
             self.window,
@@ -762,13 +759,12 @@ class PianoAppController(QObject):
         try:
             self._recorder.save_as(Path(path_text))
         except Exception as exc:
-            QMessageBox.warning(
-                self.window,
+            self.window.show_warning(
                 "Recording",
                 f"Could not save recording:\n{exc}",
             )
             return
-        QMessageBox.information(self.window, "Recording", "Recording saved.")
+        self.window.show_info("Recording", "Recording saved.")
 
     def _on_all_notes_off_requested(self) -> None:
         self._stop_all_notes()
@@ -1032,16 +1028,14 @@ class PianoAppController(QObject):
                     target_path.unlink()
             except Exception:
                 pass
-            QMessageBox.warning(
-                self.window,
+            self.window.show_warning(
                 "SoundFont Download Failed",
                 f"Could not download high quality soundfont:\n{exc}",
             )
             return False
 
         self._refresh_instruments()
-        QMessageBox.information(
-            self.window,
+        self.window.show_info(
             "SoundFont Downloaded",
             "High quality soundfont downloaded successfully.\n\n"
             f"Saved to:\n{target_path}",
@@ -1059,29 +1053,25 @@ class PianoAppController(QObject):
         portable_fonts = ensure_portable_fonts_dir()
         target_path = portable_fonts / HQ_SOUNDFONT_FILENAME
 
-        response = QMessageBox.question(
-            self.window,
+        response = self.window.ask_yes_no(
             "Grand Piano SoundFont",
             "Download high quality grand piano SoundFont (~30 MB)?\n\n"
-            "This soundfount will be stored in the fonts folder.",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.Yes,
+            "This soundfont will be stored in the fonts folder.",
+            default_yes=True,
         )
-        if response == QMessageBox.Yes:
+        if response:
             if self._download_high_quality_soundfont(target_path):
                 self._hq_soundfont_prompt_seen = True
                 self._schedule_persist()
             return
 
-        confirm_skip = QMessageBox.question(
-            self.window,
+        confirm_skip = self.window.ask_yes_no(
             "Confirm Skip",
             "Are you sure you want to skip this download?\n\n"
             "This prompt will NOT be shown again.",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
+            default_yes=False,
         )
-        if confirm_skip == QMessageBox.Yes:
+        if confirm_skip:
             self._hq_soundfont_prompt_seen = True
             self._schedule_persist()
 
@@ -1329,13 +1319,6 @@ class PianoAppController(QObject):
         if handled:
             self._mark_stats_dirty()
         return handled
-
-    @staticmethod
-    def _event_keycode(event: QKeyEvent) -> int:
-        keycodes = PianoAppController._event_keycodes(event)
-        if keycodes:
-            return keycodes[0]
-        return int(event.key())
 
     @staticmethod
     def _event_keycodes(event: QKeyEvent) -> tuple[int, ...]:
@@ -1780,22 +1763,19 @@ class PianoAppController(QObject):
         if status == "available":
             latest = str(result.get("latest", ""))
             url = str(result.get("url", OFFICIAL_WEBSITE_URL))
-            response = QMessageBox.question(
-                self.window,
+            response = self.window.ask_yes_no(
                 "Update Available",
                 f"Version {latest} is available. Open download page now?",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.Yes,
+                default_yes=True,
             )
-            if response == QMessageBox.Yes:
+            if response:
                 QDesktopServices.openUrl(QUrl(url))
             return
 
         if status == "up_to_date":
             latest = str(result.get("latest", APP_VERSION))
             if manual:
-                QMessageBox.information(
-                    self.window,
+                self.window.show_info(
                     "Up to Date",
                     f"You are up to date (v{latest}).",
                 )
@@ -1803,8 +1783,7 @@ class PianoAppController(QObject):
 
         if manual:
             message = str(result.get("error", "Unknown error"))
-            QMessageBox.warning(
-                self.window,
+            self.window.show_warning(
                 "Update Check Failed",
                 f"Could not check for updates:\n{message}",
             )
