@@ -9,7 +9,7 @@ OFFICIAL_WEBSITE_URL = "https://www.justagwas.com/projects/openpiano"
 
 UPDATE_CHECK_MANIFEST_URL = "https://www.justagwas.com/projects/openpiano/latest.json"
 UPDATE_GITHUB_LATEST_URL = "https://github.com/Justagwas/OpenPiano/releases/latest"
-UPDATE_GITHUB_DOWNLOAD_URL = "https://github.com/Justagwas/OpenPiano/releases/latest/download/OpenPianoSetup.exe"
+UPDATE_GITHUB_DOWNLOAD_URL = "https://www.justagwas.com/projects/a2m/download"
 UPDATE_SOURCEFORGE_RSS_URL = "https://sourceforge.net/projects/openpiano/rss?path=/"
 
 DEFAULT_THEME_MODE: Literal["dark", "light"] = "dark"

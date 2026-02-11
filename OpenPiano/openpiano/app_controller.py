@@ -1695,7 +1695,7 @@ class PianoAppController(QObject):
             method="GET",
         )
         with urllib.request.urlopen(request, timeout=timeout) as response:              
-            body = response.read().decode("utf-8", errors="replace")
+            body = response.read().decode("utf-8-sig", errors="replace")
         payload = json.loads(body)
         return payload if isinstance(payload, dict) else None
 
@@ -1720,10 +1720,15 @@ class PianoAppController(QObject):
                 or ""
             )
             if isinstance(version, str) and _parse_semver(version):
-                download_url = manifest.get("download_url")
+                download_url = (
+                    manifest.get("download_url")
+                    or manifest.get("url")
+                    or manifest.get("download")
+                    or ""
+                )
                 if not isinstance(download_url, str) or not download_url.strip():
                     download_url = UPDATE_GITHUB_DOWNLOAD_URL
-                return version, download_url
+                return version, download_url.strip()
 
         body, final_url = self._text_from_url(UPDATE_GITHUB_LATEST_URL)
         match = re.search(r"/tag/v?(\d+\.\d+\.\d+)", final_url)
