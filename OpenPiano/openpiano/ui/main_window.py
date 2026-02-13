@@ -46,6 +46,7 @@ from openpiano.core.config import (
 )
 from openpiano.core.theme import ThemePalette
 from openpiano.ui.piano_widget import PianoWidget
+from openpiano.ui.spotlight_overlay import SpotlightOverlay
 from openpiano.ui.stats_bar import StatsBar
 from openpiano.ui.tutorial_overlay import TutorialOverlay
 
@@ -442,6 +443,10 @@ class MainWindow(QMainWindow):
     holdSpaceSustainChanged = Signal(bool)
     showKeyLabelsChanged = Signal(bool)
     showNoteLabelsChanged = Signal(bool)
+    changeKeybindsRequested = Signal()
+    doneKeybindsRequested = Signal()
+    discardKeybindsRequested = Signal()
+    keybindEditActionBlocked = Signal()
     themeModeChanged = Signal(str)
     uiScaleChanged = Signal(float)
     animationSpeedChanged = Signal(str)
@@ -475,6 +480,7 @@ class MainWindow(QMainWindow):
         self._theme_mode = "dark"
         self._tutorial_mode = False
         self._recording_active = False
+        self._keybind_edit_active = False
         self._ui_scale_steps = int(round((UI_SCALE_MAX - UI_SCALE_MIN) / UI_SCALE_STEP))
         self._ui_scale_commit_timer = QTimer(self)
         self._ui_scale_commit_timer.setSingleShot(True)
@@ -550,6 +556,7 @@ class MainWindow(QMainWindow):
         self._build_settings_panel()
         self._build_footer(outer)
         self._build_tutorial_overlay(root)
+        self._build_keybind_spotlight_overlay(root)
 
         self.recording_indicator = QFrame(root)
         self.recording_indicator.setObjectName("recordingIndicator")
@@ -695,6 +702,40 @@ class MainWindow(QMainWindow):
         note_label_row.addWidget(self.show_note_labels_checkbox)
         note_label_row.addStretch(1)
         keyboard_layout.addLayout(note_label_row)
+
+        self.keybind_row_widget = QWidget(self.keyboard_card)
+        keybind_row = QHBoxLayout(self.keybind_row_widget)
+        self._configure_settings_row(keybind_row)
+        keybind_row.setContentsMargins(6, self._sp(3), 6, self._sp(1))
+        keybind_label = QLabel("Keybinds", self.keybind_row_widget)
+        keybind_label.setObjectName("settingLabel")
+        self.change_keybinds_button = QPushButton("Change Keybinds", self.keybind_row_widget)
+        self.change_keybinds_button.setObjectName("actionButton")
+        self.change_keybinds_button.clicked.connect(self.changeKeybindsRequested.emit)
+        self.save_keybinds_button = QPushButton("Save", self.keybind_row_widget)
+        self.save_keybinds_button.setObjectName("actionButton")
+        self.save_keybinds_button.clicked.connect(self.doneKeybindsRequested.emit)
+        self.save_keybinds_button.setVisible(False)
+        self.discard_keybinds_button = QPushButton("Discard", self.keybind_row_widget)
+        self.discard_keybinds_button.setObjectName("actionButton")
+        self.discard_keybinds_button.clicked.connect(self.discardKeybindsRequested.emit)
+        self.discard_keybinds_button.setVisible(False)
+        keybind_row.addWidget(keybind_label)
+        keybind_row.addWidget(self.change_keybinds_button)
+        keybind_row.addWidget(self.save_keybinds_button)
+        keybind_row.addWidget(self.discard_keybinds_button)
+        keybind_row.addStretch(1)
+        keyboard_layout.addWidget(self.keybind_row_widget)
+
+        keybind_hint_row = QHBoxLayout()
+        self._configure_settings_row(keybind_hint_row)
+        keybind_hint_row.setContentsMargins(6, self._sp(0), 6, self._sp(3))
+        self.keybind_hint_label = QLabel("Customize keyboard and mouse triggers for piano keys.", self.keyboard_card)
+        self.keybind_hint_label.setObjectName("settingHint")
+        self.keybind_hint_label.setWordWrap(True)
+        self.keybind_hint_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        keybind_hint_row.addWidget(self.keybind_hint_label, 1)
+        keyboard_layout.addLayout(keybind_hint_row)
 
         self.interface_card, interface_layout = self._create_section_card("Interface", self.settings_body)
         layout.addWidget(self.interface_card)
@@ -1071,7 +1112,7 @@ class MainWindow(QMainWindow):
         self.tutorial_button.setObjectName("footerLink")
         self.tutorial_button.clicked.connect(self.tutorialRequested.emit)
 
-        self.website_button = QPushButton("Official Website", self.footer_bar)
+        self.website_button = QPushButton("Official website", self.footer_bar)
         self.website_button.setObjectName("footerLink")
         self.website_button.clicked.connect(self.websiteRequested.emit)
 
@@ -1095,8 +1136,8 @@ class MainWindow(QMainWindow):
         row.addStretch(1)
         row.addWidget(self.controls_toggle_button)
         row.addStretch(1)
-        row.addWidget(self.tutorial_button)
         row.addWidget(self.website_button)
+        row.addWidget(self.tutorial_button)
         row.addWidget(version_label)
 
         footer_layout.addLayout(row)
@@ -1171,6 +1212,11 @@ class MainWindow(QMainWindow):
         self._tutorial_overlay.setGeometry(parent.rect())
         self._tutorial_overlay.hide()
 
+    def _build_keybind_spotlight_overlay(self, parent: QWidget) -> None:
+        self._keybind_overlay = SpotlightOverlay(self.theme, parent)
+        self._keybind_overlay.setGeometry(parent.rect())
+        self._keybind_overlay.hide()
+
     def _set_interaction_cursors(self) -> None:
         self.piano_widget.setFocusPolicy(Qt.StrongFocus)
         for button in self.findChildren(QPushButton):
@@ -1240,6 +1286,26 @@ class MainWindow(QMainWindow):
             return False
         return self._is_descendant_of(watched, overlay)
 
+    def is_keybind_edit_allowed_target(self, watched: object) -> bool:
+        if self._is_descendant_of(watched, self.piano_widget):
+            return True
+        if self._is_descendant_of(watched, self.keybind_row_widget):
+            return True
+        return self._is_descendant_of(watched, self.keybind_hint_label)
+
+    @staticmethod
+    def event_widget_at_pointer(watched: object, event: QEvent) -> object:
+        global_pos_getter = getattr(event, "globalPosition", None)
+        if callable(global_pos_getter):
+            try:
+                global_pos = global_pos_getter()
+                widget = QApplication.widgetAt(global_pos.toPoint())
+                if widget is not None:
+                    return widget
+            except Exception:
+                return watched
+        return watched
+
     @staticmethod
     def _is_interactive_control(watched: object) -> bool:
         return isinstance(watched, (QPushButton, QComboBox, QSlider, QCheckBox))
@@ -1284,6 +1350,25 @@ class MainWindow(QMainWindow):
                 QEvent.ShortcutOverride,
                 QEvent.ContextMenu,
             }:
+                event.accept()
+                return True
+
+        if self._keybind_edit_active:
+            blocked_mouse_events = {
+                QEvent.MouseButtonPress,
+                QEvent.MouseButtonRelease,
+                QEvent.MouseButtonDblClick,
+                QEvent.MouseMove,
+                QEvent.ContextMenu,
+            }
+            if event.type() == QEvent.Wheel:
+                self.keybindEditActionBlocked.emit()
+                event.accept()
+                return True
+            target = self.event_widget_at_pointer(watched, event)
+            if event.type() in blocked_mouse_events and not self.is_keybind_edit_allowed_target(target):
+                if event.type() in {QEvent.MouseButtonPress, QEvent.ContextMenu}:
+                    self.keybindEditActionBlocked.emit()
                 event.accept()
                 return True
 
@@ -1410,6 +1495,10 @@ class MainWindow(QMainWindow):
                 color: {self.theme.text_primary};
                 font: 600 {value_font}pt "Segoe UI";
                 min-width: {self._sp(54)}px;
+            }}
+            #settingHint {{
+                color: {self.theme.text_secondary};
+                font: 500 {self._sp(9)}pt "Segoe UI";
             }}
             #settingCheckbox {{
                 color: {self.theme.text_primary};
@@ -1587,6 +1676,9 @@ class MainWindow(QMainWindow):
         overlay = getattr(self, "_tutorial_overlay", None)
         if overlay is not None:
             overlay.set_theme(self.theme)
+        keybind_overlay = getattr(self, "_keybind_overlay", None)
+        if keybind_overlay is not None:
+            keybind_overlay.set_theme(self.theme)
 
     def refresh_fixed_size(self) -> None:
         self.centralWidget().layout().activate()
@@ -1595,12 +1687,14 @@ class MainWindow(QMainWindow):
         self._position_recording_indicator()
         QTimer.singleShot(0, self._sync_all_notes_off_width)
         self._sync_tutorial_overlay()
+        self._sync_keybind_overlay()
 
     def resizeEvent(self, event) -> None:                          
         super().resizeEvent(event)
         self._position_recording_indicator()
         QTimer.singleShot(0, self._sync_all_notes_off_width)
         self._sync_tutorial_overlay()
+        self._sync_keybind_overlay()
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -1987,6 +2081,28 @@ class MainWindow(QMainWindow):
         self.show_key_labels_checkbox.blockSignals(False)
         self.show_note_labels_checkbox.blockSignals(False)
 
+    def set_keybind_edit_mode(self, active: bool, status_text: str = "") -> None:
+        self._keybind_edit_active = bool(active)
+        self.change_keybinds_button.setVisible(not self._keybind_edit_active)
+        self.save_keybinds_button.setVisible(self._keybind_edit_active)
+        self.save_keybinds_button.setEnabled(self._keybind_edit_active)
+        self.discard_keybinds_button.setVisible(self._keybind_edit_active)
+        self.discard_keybinds_button.setEnabled(self._keybind_edit_active)
+        if self._keybind_edit_active:
+            self.keybind_hint_label.setText(
+                status_text
+                or "Select a key on the piano, then press a keyboard combo or mouse combo. Press Save or Discard when finished. Ctrl+Z undoes the last change."
+            )
+            self._sync_keybind_overlay()
+            self._keybind_overlay.show()
+            self._keybind_overlay.raise_()
+        else:
+            self.keybind_hint_label.setText(
+                status_text
+                or "Customize keyboard and mouse triggers for piano keys."
+            )
+            self._keybind_overlay.hide()
+
     def set_theme_mode(self, mode: str) -> None:
         self._theme_mode = "light" if mode == "light" else "dark"
         if not hasattr(self, "theme_toggle_button"):
@@ -2076,6 +2192,7 @@ class MainWindow(QMainWindow):
         self.settings_scroll.setVisible(self._settings_visible)
         self.settings_toggle_button.setText("Hide Settings" if self._settings_visible else "Show Settings")
         self._update_panel_divider_visibility()
+        self._sync_keybind_overlay()
         self.refresh_fixed_size()
 
     def set_controls_visible(self, visible: bool) -> None:
@@ -2083,6 +2200,7 @@ class MainWindow(QMainWindow):
         self.controls_scroll.setVisible(self._controls_visible)
         self.controls_toggle_button.setText("Hide Controls" if self._controls_visible else "Show Controls")
         self._update_panel_divider_visibility()
+        self._sync_keybind_overlay()
         self.refresh_fixed_size()
 
     def set_stats_visible(self, visible: bool) -> None:
@@ -2111,6 +2229,7 @@ class MainWindow(QMainWindow):
             "sound_section": self.sound_card,
             "sound_velocity": self.velocity_slider,
             "keyboard_section": self.keyboard_card,
+            "keyboard_keybinds": self.keybind_row_widget,
             "interface_section": self.interface_card,
             "controls_section": self.controls_card,
             "reset_defaults": self.reset_defaults_button,
@@ -2173,3 +2292,38 @@ class MainWindow(QMainWindow):
         if overlay is None:
             return
         overlay.sync_to_parent()
+
+    def _sync_keybind_overlay(self) -> None:
+        overlay = getattr(self, "_keybind_overlay", None)
+        if overlay is None:
+            return
+        overlay.sync_to_parent()
+        if not self._keybind_edit_active:
+            overlay.set_target_rects([])
+            return
+
+        root = self.centralWidget()
+        if root is None:
+            overlay.set_target_rects([])
+            return
+
+        targets: list[QRect] = []
+        for widget in (self.piano_widget,):
+            if widget is None or (not widget.isVisible()):
+                continue
+            top_left = widget.mapTo(root, QPoint(0, 0))
+            targets.append(QRect(top_left, widget.size()))
+        row_widget = self.keybind_row_widget
+        hint_widget = self.keybind_hint_label
+        if (
+            row_widget is not None
+            and hint_widget is not None
+            and row_widget.isVisible()
+            and hint_widget.isVisible()
+        ):
+            row_top_left = row_widget.mapTo(root, QPoint(0, 0))
+            hint_top_left = hint_widget.mapTo(root, QPoint(0, 0))
+            row_rect = QRect(row_top_left, row_widget.size())
+            hint_rect = QRect(hint_top_left, hint_widget.size())
+            targets.append(row_rect.united(hint_rect))
+        overlay.set_target_rects(targets)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import threading
 import time
 import urllib.request
@@ -11,7 +12,7 @@ from pathlib import Path
 from typing import Callable
 
 from PySide6.QtCore import QEvent, QObject, QTimer, Qt, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QKeyEvent
+from PySide6.QtGui import QDesktopServices, QKeyEvent, QMouseEvent
 from PySide6.QtWidgets import QApplication, QFileDialog
 
 from openpiano.core.audio_engine import AudioEngineProtocol, FluidSynthAudioEngine, SilentAudioEngine
@@ -34,27 +35,43 @@ from openpiano.core.config import (
     UPDATE_CHECK_MANIFEST_URL,
     UPDATE_GITHUB_DOWNLOAD_URL,
     UPDATE_GITHUB_LATEST_URL,
+    UPDATE_SOURCEFORGE_DOWNLOAD_URL,
     UPDATE_SOURCEFORGE_RSS_URL,
 )
 from openpiano.core.instrument_registry import (
     InstrumentInfo,
     discover_instruments,
-    ensure_portable_fonts_dir,
+    ensure_user_fonts_dir,
+    localappdata_fonts_dir,
+    portable_fonts_dir,
     select_fallback_instrument,
 )
 from openpiano.core.keymap import (
     Binding,
     MODE_RANGES,
     PianoMode,
-    get_binding_to_midi,
+    apply_custom_keybinds,
+    binding_to_inline_label,
+    build_binding_to_notes,
+    deserialize_custom_keybind_payload,
+    extract_custom_keybind_overrides,
     get_mode_mapping,
     get_note_labels,
+    normalize_mouse_binding,
     normalize_key_event,
+    serialize_custom_keybind_payload,
 )
 from openpiano.core.music_logic import clamp_transposed_note, sustain_hold_ms
 from openpiano.core.midi_input import MidiInputManager
 from openpiano.core.midi_recording import MidiRecorder
-from openpiano.core.settings_store import AppSettings, load_settings, save_settings
+from openpiano.core.settings_store import (
+    AppSettings,
+    appdata_settings_path,
+    migrate_portable_settings_to_appdata,
+    portable_settings_path,
+    load_settings,
+    save_settings,
+)
 from openpiano.core.stats_logic import collect_stats_values, trim_kps_events
 from openpiano.core.theme import apply_key_color_overrides, get_theme
 from openpiano.ui.main_window import MainWindow
@@ -134,16 +151,29 @@ class PianoAppController(QObject):
         self._black_key_color = settings.black_key_color
         self._black_key_pressed_color = settings.black_key_pressed_color
         self._hq_soundfont_prompt_seen = bool(settings.hq_soundfont_prompt_seen)
+        self._legacy_data_migration_prompt_seen = bool(settings.legacy_data_migration_prompt_seen)
         self._space_override_off = False
+        self._default_keybind_map_full = get_mode_mapping("88")
+        self._custom_keybind_overrides = deserialize_custom_keybind_payload(settings.custom_keybinds)
+        self._keybind_committed_map_full = apply_custom_keybinds(
+            self._default_keybind_map_full,
+            self._custom_keybind_overrides,
+        )
+        self._keybind_staging_map_full: dict[int, Binding] = dict(self._keybind_committed_map_full)
+        self._keybind_edit_active = False
+        self._keybind_selected_note: int | None = None
+        self._keybind_edit_undo_stack: list[tuple[int, Binding]] = []
 
         self._mapping: dict[int, Binding] = {}
         self._binding_to_midi: dict[Binding, int] = {}
+        self._binding_to_notes: dict[Binding, tuple[int, ...]] = {}
         self._note_labels: dict[int, str] = {}
         self._keys: list[int] = []
         self._mode_min = 36
         self._mode_max = 96
 
         self._active_bindings: set[Binding] = set()
+        self._active_binding_sources: dict[Binding, tuple[str, ...]] = {}
         self._keycode_to_binding: dict[int, Binding] = {}
         self._binding_to_keycodes: dict[Binding, set[int]] = {}
         self._note_sources: dict[int, set[str]] = {}
@@ -227,6 +257,7 @@ class PianoAppController(QObject):
         self.window.set_key_color("white_key_pressed", self._white_key_pressed_color)
         self.window.set_key_color("black_key", self._black_key_color)
         self.window.set_key_color("black_key_pressed", self._black_key_pressed_color)
+        self.window.set_keybind_edit_mode(False)
 
         self.window.piano_widget.set_label_visibility(self._show_key_labels, self._show_note_labels)
         self.window.piano_widget.set_animation_speed(self._animation_speed)
@@ -271,6 +302,10 @@ class PianoAppController(QObject):
         self.window.holdSpaceSustainChanged.connect(self._on_hold_space_sustain_changed)
         self.window.showKeyLabelsChanged.connect(self._on_show_key_labels_changed)
         self.window.showNoteLabelsChanged.connect(self._on_show_note_labels_changed)
+        self.window.changeKeybindsRequested.connect(self._on_change_keybinds_requested)
+        self.window.doneKeybindsRequested.connect(self._on_done_keybinds_requested)
+        self.window.discardKeybindsRequested.connect(self._on_discard_keybinds_requested)
+        self.window.keybindEditActionBlocked.connect(self._on_keybind_edit_action_blocked)
         self.window.themeModeChanged.connect(self._on_theme_mode_changed)
         self.window.uiScaleChanged.connect(self._on_ui_scale_changed)
         self.window.animationSpeedChanged.connect(self._on_animation_speed_changed)
@@ -296,6 +331,7 @@ class PianoAppController(QObject):
         self.window.piano_widget.notePressed.connect(self._on_mouse_note_pressed)
         self.window.piano_widget.noteReleased.connect(self._on_mouse_note_released)
         self.window.piano_widget.dragNoteChanged.connect(self._on_mouse_drag_note_changed)
+        self.window.piano_widget.keybindKeySelected.connect(self._on_keybind_note_selected)
 
     def _init_audio_engine(self) -> None:
         try:
@@ -521,19 +557,33 @@ class PianoAppController(QObject):
         if new_mode == self._mode:
             return
         self._stop_all_notes()
-        self._apply_mode(new_mode, persist=True)
+        if self._keybind_edit_active:
+            self._apply_mode(new_mode, persist=True, mapping_full=self._keybind_staging_map_full)
+        else:
+            self._apply_mode(new_mode, persist=True)
         self._refresh_stats_ui()
 
-    def _apply_mode(self, mode: PianoMode, persist: bool) -> None:
+    def _apply_mode(
+        self,
+        mode: PianoMode,
+        persist: bool,
+        mapping_full: dict[int, Binding] | None = None,
+    ) -> None:
         self._mode = mode
-        self._mapping = get_mode_mapping(mode)
-        self._binding_to_midi = get_binding_to_midi(mode)
+        full_map = mapping_full if mapping_full is not None else self._keybind_committed_map_full
+        mode_min, mode_max = MODE_RANGES[mode]
+        self._mapping = {note: full_map[note] for note in range(mode_min, mode_max + 1)}
+        self._binding_to_notes = build_binding_to_notes(self._mapping)
+        self._binding_to_midi = {
+            binding: notes[0] for binding, notes in self._binding_to_notes.items() if notes
+        }
         self._note_labels = get_note_labels(mode)
         self._keys = sorted(self._mapping.keys())
         self._mode_min, self._mode_max = MODE_RANGES[mode]
 
         self.window.piano_widget.set_mode(mode, self._mapping, self._note_labels)
-        self.window.piano_widget.set_label_visibility(self._show_key_labels, self._show_note_labels)
+        show_key_labels = True if self._keybind_edit_active else self._show_key_labels
+        self.window.piano_widget.set_label_visibility(show_key_labels, self._show_note_labels)
         self.window.piano_widget.set_ui_scale(self._ui_scale)
         self.window.set_mode(mode)
         self.window.set_window_key_count(len(self._keys))
@@ -627,13 +677,129 @@ class PianoAppController(QObject):
 
     def _on_show_key_labels_changed(self, enabled: bool) -> None:
         self._show_key_labels = bool(enabled)
-        self.window.piano_widget.set_label_visibility(self._show_key_labels, self._show_note_labels)
+        show_key_labels = True if self._keybind_edit_active else self._show_key_labels
+        self.window.piano_widget.set_label_visibility(show_key_labels, self._show_note_labels)
         self._schedule_persist()
 
     def _on_show_note_labels_changed(self, enabled: bool) -> None:
         self._show_note_labels = bool(enabled)
-        self.window.piano_widget.set_label_visibility(self._show_key_labels, self._show_note_labels)
+        show_key_labels = True if self._keybind_edit_active else self._show_key_labels
+        self.window.piano_widget.set_label_visibility(show_key_labels, self._show_note_labels)
         self._schedule_persist()
+
+    def _set_keybind_editor_status(self, text: str = "") -> None:
+        self.window.set_keybind_edit_mode(self._keybind_edit_active, text)
+
+    def _on_keybind_edit_action_blocked(self) -> None:
+        if not self._keybind_edit_active:
+            return
+        self._set_keybind_editor_status(
+            "Keybind editing is active. Press Save to apply changes or Discard to cancel.",
+        )
+
+    def _on_change_keybinds_requested(self) -> None:
+        if self._tutorial_active or self._keybind_edit_active:
+            return
+        self._stop_all_notes()
+        self._keybind_edit_active = True
+        self._keybind_selected_note = None
+        self._keybind_staging_map_full = dict(self._keybind_committed_map_full)
+        self._keybind_edit_undo_stack.clear()
+        self.window.piano_widget.set_keybind_edit_mode(True, None)
+        self._apply_mode(self._mode, persist=False, mapping_full=self._keybind_staging_map_full)
+        self.window.piano_widget.set_label_visibility(True, self._show_note_labels)
+        self._set_keybind_editor_status(
+            "Select a key on the piano, then press a keyboard combo or mouse combo. Press Save or Discard when finished. Ctrl+Z undoes the last change.",
+        )
+        self.window.piano_widget.setFocus()
+
+    def _on_done_keybinds_requested(self) -> None:
+        if not self._keybind_edit_active:
+            return
+        self._keybind_committed_map_full = dict(self._keybind_staging_map_full)
+        self._custom_keybind_overrides = extract_custom_keybind_overrides(
+            self._default_keybind_map_full,
+            self._keybind_committed_map_full,
+        )
+        self._keybind_edit_active = False
+        self._keybind_selected_note = None
+        self._keybind_edit_undo_stack.clear()
+        self.window.piano_widget.set_keybind_edit_mode(False, None)
+        self._apply_mode(self._mode, persist=False)
+        self.window.piano_widget.set_label_visibility(self._show_key_labels, self._show_note_labels)
+        self._set_keybind_editor_status("")
+        self._persist_settings_now()
+
+    def _on_discard_keybinds_requested(self) -> None:
+        if not self._keybind_edit_active:
+            return
+        self._keybind_staging_map_full = dict(self._keybind_committed_map_full)
+        self._keybind_edit_active = False
+        self._keybind_selected_note = None
+        self._keybind_edit_undo_stack.clear()
+        self.window.piano_widget.set_keybind_edit_mode(False, None)
+        self._apply_mode(self._mode, persist=False)
+        self.window.piano_widget.set_label_visibility(self._show_key_labels, self._show_note_labels)
+        self._set_keybind_editor_status("Changes discarded.")
+
+    def _on_keybind_note_selected(self, note: int) -> None:
+        if not self._keybind_edit_active:
+            return
+        if note not in self._keybind_staging_map_full:
+            return
+        self._keybind_selected_note = int(note)
+        self.window.piano_widget.set_selected_keybind_note(self._keybind_selected_note)
+        note_label = self._note_labels.get(self._keybind_selected_note, f"MIDI {self._keybind_selected_note}")
+        binding = self._keybind_staging_map_full.get(self._keybind_selected_note)
+        binding_label = binding_to_inline_label(binding) if binding is not None else "None"
+        self._set_keybind_editor_status(
+            f"{note_label} selected. Press a combo to assign. Current: {binding_label}",
+        )
+
+    def _assign_binding_to_selected_note(self, binding: Binding) -> bool:
+        if not self._keybind_edit_active or self._keybind_selected_note is None:
+            return False
+        target_note = int(self._keybind_selected_note)
+        if target_note not in self._keybind_staging_map_full:
+            return False
+        previous_binding = self._keybind_staging_map_full[target_note]
+        if binding == previous_binding:
+            note_label = self._note_labels.get(target_note, f"MIDI {target_note}")
+            binding_label = binding_to_inline_label(binding)
+            self._set_keybind_editor_status(
+                f"{note_label} is already mapped to {binding_label}. Select another key or click Save/Discard.",
+            )
+            return True
+        self._keybind_edit_undo_stack.append((target_note, previous_binding))
+        self._keybind_staging_map_full[target_note] = binding
+        self._apply_mode(self._mode, persist=False, mapping_full=self._keybind_staging_map_full)
+        self.window.piano_widget.set_keybind_edit_mode(True, target_note)
+        self.window.piano_widget.set_selected_keybind_note(target_note)
+        note_label = self._note_labels.get(target_note, f"MIDI {target_note}")
+        binding_label = binding_to_inline_label(binding)
+        self._set_keybind_editor_status(
+            f"{note_label} mapped to {binding_label}. Select another key or click Save/Discard.",
+        )
+        return True
+
+    def _undo_last_keybind_assignment(self) -> bool:
+        if not self._keybind_edit_active:
+            return False
+        if not self._keybind_edit_undo_stack:
+            self._set_keybind_editor_status("No keybind changes to undo. Press Save or Discard.")
+            return True
+        note, previous_binding = self._keybind_edit_undo_stack.pop()
+        self._keybind_selected_note = int(note)
+        self._keybind_staging_map_full[self._keybind_selected_note] = previous_binding
+        self._apply_mode(self._mode, persist=False, mapping_full=self._keybind_staging_map_full)
+        self.window.piano_widget.set_keybind_edit_mode(True, self._keybind_selected_note)
+        self.window.piano_widget.set_selected_keybind_note(self._keybind_selected_note)
+        note_label = self._note_labels.get(self._keybind_selected_note, f"MIDI {self._keybind_selected_note}")
+        binding_label = binding_to_inline_label(previous_binding)
+        self._set_keybind_editor_status(
+            f"Undo applied. {note_label} reverted to {binding_label}. Press Save or Discard when finished.",
+        )
+        return True
 
     def _on_theme_mode_changed(self, mode: str) -> None:
         theme_mode = "light" if mode == "light" else "dark"
@@ -769,6 +935,8 @@ class PianoAppController(QObject):
     def _on_all_notes_off_requested(self) -> None:
         self._stop_all_notes()
     def _on_tutorial_requested(self) -> None:
+        if self._keybind_edit_active:
+            return
         self.start_tutorial()
 
     def _build_tutorial_steps(self) -> list[TutorialStep]:
@@ -794,7 +962,7 @@ class PianoAppController(QObject):
             {
                 "id": "footer",
                 "title": "Footer Actions",
-                "body": "Use footer links to open settings, controls, hide stats, launch tutorial, or open website.",
+                "body": "Use footer links to open settings, controls, hide stats, open the official website, or relaunch this tutorial from the right side.",
                 "target": "footer",
             },
             {
@@ -866,9 +1034,16 @@ class PianoAppController(QObject):
                 "open_settings": True,
             },
             {
+                "id": "keyboard_keybinds",
+                "title": "Change Keybinds",
+                "body": "Click Change Keybinds to enter focused edit mode. While active, other controls are blocked. Select a piano key, press a keyboard/mouse combo, use Ctrl+Z to undo the last change, then press Save to apply or Discard to cancel.",
+                "target": "keyboard_keybinds",
+                "open_settings": True,
+            },
+            {
                 "id": "keyboard_88_mode",
                 "title": "88-Key Mode",
-                "body": "88-key mode is available here. The extra keys can be played using Control (ctrl) + (the key) which is indicated with C + (the key).",
+                "body": "88-key mode is available here. The extra keys can be played using Ctrl + (the key), indicated with C + (the key).",
                 "target": "keyboard_section",
                 "open_settings": True,
                 "set_mode": "88",
@@ -1042,6 +1217,93 @@ class PianoAppController(QObject):
         )
         return True
 
+    @staticmethod
+    def _portable_font_candidates() -> list[Path]:
+        portable_dir = portable_fonts_dir()
+        user_dir = localappdata_fonts_dir()
+        if portable_dir.resolve() == user_dir.resolve():
+            return []
+        if not portable_dir.exists() or not portable_dir.is_dir():
+            return []
+        candidates: list[Path] = []
+        for ext in (".sf2", ".sf3"):
+            candidates.extend(portable_dir.glob(f"*{ext}"))
+        deduped: list[Path] = []
+        for path in sorted(candidates, key=lambda item: item.name.lower()):
+            if path.is_file() and path not in deduped:
+                deduped.append(path)
+        return deduped
+
+    def _copy_portable_fonts_to_user(self) -> tuple[int, int]:
+        copied = 0
+        skipped = 0
+        target_dir = ensure_user_fonts_dir()
+        for source in self._portable_font_candidates():
+            target = target_dir / source.name
+            if target.exists():
+                skipped += 1
+            else:
+                try:
+                    shutil.copy2(source, target)
+                    copied += 1
+                except Exception:
+                    skipped += 1
+            sidecar = source.with_suffix(f"{source.suffix}.json")
+            if sidecar.exists() and sidecar.is_file():
+                target_sidecar = target.with_suffix(f"{target.suffix}.json")
+                if not target_sidecar.exists():
+                    try:
+                        shutil.copy2(sidecar, target_sidecar)
+                    except Exception:
+                        pass
+        return copied, skipped
+
+    def _maybe_prompt_legacy_data_migration(self) -> None:
+        if self._is_shutdown or self._legacy_data_migration_prompt_seen:
+            return
+        portable_settings = portable_settings_path()
+        appdata_settings = appdata_settings_path()
+        has_settings_candidate = (
+            appdata_settings is not None
+            and portable_settings.exists()
+            and not appdata_settings.exists()
+        )
+        font_candidates = self._portable_font_candidates()
+        if not has_settings_candidate and not font_candidates:
+            self._legacy_data_migration_prompt_seen = True
+            self._schedule_persist()
+            return
+
+        items: list[str] = []
+        if has_settings_candidate:
+            items.append("your settings file")
+        if font_candidates:
+            items.append(f"{len(font_candidates)} soundfont file(s)")
+        items_text = ", ".join(items)
+
+        response = self.window.ask_yes_no(
+            "Migrate Legacy Data",
+            "OpenPiano found data from an older install location.\n\n"
+            f"Found: {items_text}.\n\n"
+            "Copy these to your LocalAppData profile so upgrades keep them automatically?",
+            default_yes=True,
+        )
+        if response:
+            migrated_settings = migrate_portable_settings_to_appdata(overwrite=False) if has_settings_candidate else False
+            copied_fonts, skipped_fonts = self._copy_portable_fonts_to_user()
+            if copied_fonts > 0:
+                self._refresh_instruments()
+            self.window.show_info(
+                "Migration Complete",
+                "Legacy data migration finished.\n\n"
+                f"Settings copied: {'yes' if migrated_settings else 'no'}\n"
+                f"Soundfonts copied: {copied_fonts}\n"
+                f"Soundfonts skipped: {skipped_fonts}",
+            )
+
+        self._legacy_data_migration_prompt_seen = True
+        self._schedule_persist()
+
     def _maybe_prompt_high_quality_soundfont(self) -> None:
         if self._is_shutdown or self._hq_soundfont_prompt_seen:
             return
@@ -1050,13 +1312,13 @@ class PianoAppController(QObject):
             self._schedule_persist()
             return
 
-        portable_fonts = ensure_portable_fonts_dir()
-        target_path = portable_fonts / HQ_SOUNDFONT_FILENAME
+        user_fonts = ensure_user_fonts_dir()
+        target_path = user_fonts / HQ_SOUNDFONT_FILENAME
 
         response = self.window.ask_yes_no(
             "Grand Piano SoundFont",
             "Download high quality grand piano SoundFont (~30 MB)?\n\n"
-            "This soundfont will be stored in the fonts folder.",
+            "This soundfont will be stored in your user soundfonts folder.",
             default_yes=True,
         )
         if response:
@@ -1105,6 +1367,13 @@ class PianoAppController(QObject):
         self._black_key_color = defaults.black_key_color
         self._black_key_pressed_color = defaults.black_key_pressed_color
         self._hq_soundfont_prompt_seen = defaults.hq_soundfont_prompt_seen
+        self._legacy_data_migration_prompt_seen = defaults.legacy_data_migration_prompt_seen
+        self._custom_keybind_overrides = {}
+        self._keybind_committed_map_full = dict(self._default_keybind_map_full)
+        self._keybind_staging_map_full = dict(self._default_keybind_map_full)
+        self._keybind_edit_active = False
+        self._keybind_selected_note = None
+        self._keybind_edit_undo_stack.clear()
         self._space_override_off = False
         self._kps_events.clear()
 
@@ -1127,6 +1396,8 @@ class PianoAppController(QObject):
         self.window.set_hold_space_sustain_mode(self._hold_space_for_sustain)
         self.window.set_label_visibility(self._show_key_labels, self._show_note_labels)
         self.window.piano_widget.set_label_visibility(self._show_key_labels, self._show_note_labels)
+        self.window.piano_widget.set_keybind_edit_mode(False, None)
+        self.window.set_keybind_edit_mode(False)
         self.window.set_stats_visible(self._show_stats)
         self.window.set_settings_visible(False)
         self.window.set_controls_visible(self._controls_open)
@@ -1155,18 +1426,18 @@ class PianoAppController(QObject):
         self._schedule_persist()
 
     def _on_mouse_note_pressed(self, base_note: int) -> None:
-        if self._tutorial_active:
+        if self._tutorial_active or self._keybind_edit_active:
             return
         self._current_mouse_base_note = int(base_note)
         self._activate_mouse_source(self._current_mouse_base_note)
 
     def _on_mouse_note_released(self, _base_note: int) -> None:
-        if self._tutorial_active:
+        if self._tutorial_active or self._keybind_edit_active:
             return
         self._release_mouse_source()
 
     def _on_mouse_drag_note_changed(self, base_note: object) -> None:
-        if self._tutorial_active:
+        if self._tutorial_active or self._keybind_edit_active:
             return
         if base_note is None:
             self._current_mouse_base_note = None
@@ -1252,6 +1523,18 @@ class PianoAppController(QObject):
             self._refresh_stats_ui()
             return False
 
+        if self._keybind_edit_active and event.type() == QEvent.MouseButtonPress:
+            if self._is_main_window_key_context(watched):
+                mouse_event = event
+                if isinstance(mouse_event, QMouseEvent):
+                    target = self.window.event_widget_at_pointer(watched, mouse_event)
+                    if not self.window.is_keybind_edit_allowed_target(target):
+                        self._on_keybind_edit_action_blocked()
+                        mouse_event.accept()
+                        return True
+                    if self._is_descendant_of(target, self.window.piano_widget) and self._handle_keybind_mouse_press_event(mouse_event):
+                        return True
+
         if event.type() == QEvent.KeyPress:
             if not self._is_main_window_key_context(watched):
                 return super().eventFilter(watched, event)
@@ -1277,6 +1560,23 @@ class PianoAppController(QObject):
         if self._tutorial_active:
             if key == int(Qt.Key.Key_Escape) and not event.isAutoRepeat():
                 self._end_tutorial(completed=False)
+            return True
+        if self._keybind_edit_active:
+            if event.isAutoRepeat():
+                return True
+            modifiers = event.modifiers()
+            if (
+                bool(modifiers & Qt.ControlModifier)
+                and not bool(modifiers & Qt.AltModifier)
+                and int(event.key()) == int(Qt.Key.Key_Z)
+            ):
+                return self._undo_last_keybind_assignment()
+            binding = self._binding_from_key_event(event)
+            if binding is None:
+                if self._keybind_selected_note is None:
+                    self._set_keybind_editor_status("Select a piano key first, then press a combo.")
+                return True
+            self._assign_binding_to_selected_note(binding)
             return True
         if key in {int(Qt.Key.Key_Tab), int(Qt.Key.Key_Backtab)}:
             return True
@@ -1318,6 +1618,8 @@ class PianoAppController(QObject):
     def _handle_key_release_event(self, event: QKeyEvent) -> bool:
         key = int(event.key())
         if self._tutorial_active:
+            return True
+        if self._keybind_edit_active:
             return True
         if key in {int(Qt.Key.Key_Tab), int(Qt.Key.Key_Backtab)}:
             return True
@@ -1376,7 +1678,39 @@ class PianoAppController(QObject):
         modifiers = event.modifiers()
         shift = bool(modifiers & Qt.ShiftModifier)
         ctrl = bool(modifiers & Qt.ControlModifier)
-        return normalize_key_event(text, key_name, shift=shift, ctrl=ctrl)
+        alt = bool(modifiers & Qt.AltModifier)
+        return normalize_key_event(text, key_name, shift=shift, ctrl=ctrl, alt=alt)
+
+    def _handle_keybind_mouse_press_event(self, event: QMouseEvent) -> bool:
+        if not self._keybind_edit_active:
+            return False
+        button = event.button()
+        if button == Qt.MouseButton.LeftButton:
+            return False
+        button_name_map = {
+            Qt.MouseButton.RightButton: "right",
+            Qt.MouseButton.MiddleButton: "middle",
+            Qt.MouseButton.BackButton: "x1",
+            Qt.MouseButton.ForwardButton: "x2",
+        }
+        button_name = button_name_map.get(button, str(button).split(".")[-1])
+        modifiers = event.modifiers()
+        binding = normalize_mouse_binding(
+            button_name,
+            shift=bool(modifiers & Qt.ShiftModifier),
+            ctrl=bool(modifiers & Qt.ControlModifier),
+            alt=bool(modifiers & Qt.AltModifier),
+        )
+        if binding is None:
+            event.accept()
+            return True
+        if self._keybind_selected_note is None:
+            self._set_keybind_editor_status("Select a piano key first, then press a combo.")
+            event.accept()
+            return True
+        self._assign_binding_to_selected_note(binding)
+        event.accept()
+        return True
 
     @staticmethod
     def _key_name_from_event(event: QKeyEvent) -> str:
@@ -1410,9 +1744,8 @@ class PianoAppController(QObject):
         return text.lower() if len(text) == 1 else ""
 
     def _source_for_binding(self, binding: Binding) -> str:
-        if isinstance(binding, tuple):
-            return f"kb:{binding[0]}:{binding[1]}"
-        return f"kb:{binding}"
+        source, token, ctrl, shift, alt = binding
+        return f"bind:{source}:{token}:{1 if ctrl else 0}:{1 if shift else 0}:{1 if alt else 0}"
 
     def _apply_transpose(self, base_note: int) -> int:
         return clamp_transposed_note(base_note, self._transpose, self._mode_min, self._mode_max)
@@ -1440,21 +1773,15 @@ class PianoAppController(QObject):
     def _release_candidates(binding_hint: Binding | None) -> tuple[Binding, ...]:
         if binding_hint is None:
             return ()
+        source, token, _, _, _ = binding_hint
         candidates: list[Binding] = [binding_hint]
-        if isinstance(binding_hint, str):
-            base = binding_hint.strip().lower()
-            if len(base) == 1 and base.isalnum():
-                candidates.append(("shift", base))
-                candidates.append(("ctrl", base))
-        elif isinstance(binding_hint, tuple):
-            modifier, base_value = binding_hint
-            base = str(base_value).strip().lower()
-            if len(base) == 1 and base.isalnum():
-                candidates.append(base)
-                if modifier == "shift":
-                    candidates.append(("ctrl", base))
-                elif modifier == "ctrl":
-                    candidates.append(("shift", base))
+        if source == "keyboard":
+            for ctrl in (False, True):
+                for shift in (False, True):
+                    for alt in (False, True):
+                        candidate: Binding = (source, token, ctrl, shift, alt)
+                        if candidate not in candidates:
+                            candidates.append(candidate)
         deduped: list[Binding] = []
         for candidate in candidates:
             if candidate not in deduped:
@@ -1469,19 +1796,24 @@ class PianoAppController(QObject):
         return None
 
     def _handle_binding_press(self, binding: Binding, keycodes: int | tuple[int, ...]) -> bool:
-        base_note = self._binding_to_midi.get(binding)
-        if base_note is None:
+        base_notes = self._binding_to_notes.get(binding, ())
+        if not base_notes:
             return False
         if binding in self._active_bindings:
             return False
 
         source = self._source_for_binding(binding)
-        sounding_note = self._apply_transpose(base_note)
         self._active_bindings.add(binding)
+        source_keys: list[str] = []
         normalized_keycodes = self._normalize_keycodes(keycodes)
         self._register_binding_keycodes(binding, normalized_keycodes)
-        self._source_to_sounding_note[source] = sounding_note
-        self._activate_note(sounding_note, source, velocity=self._velocity)
+        for base_note in base_notes:
+            sounding_note = self._apply_transpose(base_note)
+            source_key = f"{source}:{base_note}"
+            source_keys.append(source_key)
+            self._source_to_sounding_note[source_key] = sounding_note
+            self._activate_note(sounding_note, source_key, velocity=self._velocity)
+        self._active_binding_sources[binding] = tuple(source_keys)
         return True
 
     def _handle_binding_release(self, keycodes: int | tuple[int, ...], binding_hint: Binding | None = None) -> bool:
@@ -1497,12 +1829,15 @@ class PianoAppController(QObject):
 
         self._remove_binding_keycodes(binding)
         self._active_bindings.discard(binding)
-        source = self._source_for_binding(binding)
-        sounding_note = self._source_to_sounding_note.pop(source, None)
-        if sounding_note is None:
-            return False
-        self._release_note_source(sounding_note, source)
-        return True
+        sources = self._active_binding_sources.pop(binding, ())
+        released = False
+        for source in sources:
+            sounding_note = self._source_to_sounding_note.pop(source, None)
+            if sounding_note is None:
+                continue
+            self._release_note_source(sounding_note, source)
+            released = True
+        return released
 
     def _activate_note(self, note: int, source: str, velocity: int = 100) -> None:
         sources = self._note_sources.setdefault(note, set())
@@ -1558,6 +1893,7 @@ class PianoAppController(QObject):
     def _stop_all_notes(self) -> None:
         notes = set(self._note_sources.keys()) | set(self._sustained_notes.keys())
         self._active_bindings.clear()
+        self._active_binding_sources.clear()
         self._keycode_to_binding.clear()
         self._binding_to_keycodes.clear()
         self._note_sources.clear()
@@ -1680,6 +2016,8 @@ class PianoAppController(QObject):
             black_key_color=self._black_key_color,
             black_key_pressed_color=self._black_key_pressed_color,
             hq_soundfont_prompt_seen=self._hq_soundfont_prompt_seen,
+            legacy_data_migration_prompt_seen=self._legacy_data_migration_prompt_seen,
+            custom_keybinds=serialize_custom_keybind_payload(self._custom_keybind_overrides),
         )
         save_settings(settings, self._settings_path)
 
@@ -1711,42 +2049,59 @@ class PianoAppController(QObject):
         return body, final_url
 
     def _detect_latest_version(self) -> tuple[str, str]:
-        manifest = self._json_from_url(UPDATE_CHECK_MANIFEST_URL)
-        if manifest is not None:
-            version = (
-                manifest.get("version")
-                or manifest.get("latest")
-                or manifest.get("app_version")
-                or ""
-            )
-            if isinstance(version, str) and _parse_semver(version):
-                download_url = (
-                    manifest.get("download_url")
-                    or manifest.get("url")
-                    or manifest.get("download")
+        errors: list[str] = []
+
+        try:
+            manifest = self._json_from_url(UPDATE_CHECK_MANIFEST_URL)
+            if manifest is not None:
+                version = (
+                    manifest.get("version")
+                    or manifest.get("latest")
+                    or manifest.get("app_version")
                     or ""
                 )
-                if not isinstance(download_url, str) or not download_url.strip():
-                    download_url = UPDATE_GITHUB_DOWNLOAD_URL
-                return version, download_url.strip()
+                if isinstance(version, str) and _parse_semver(version):
+                    download_url = (
+                        manifest.get("download_url")
+                        or manifest.get("url")
+                        or manifest.get("download")
+                        or ""
+                    )
+                    if not isinstance(download_url, str) or not download_url.strip():
+                        download_url = UPDATE_GITHUB_DOWNLOAD_URL
+                    return version, download_url.strip()
+                errors.append("latest.json did not contain a valid semantic version")
+            else:
+                errors.append("latest.json did not return a JSON object")
+        except Exception as exc:
+            errors.append(f"latest.json failed: {exc}")
 
-        body, final_url = self._text_from_url(UPDATE_GITHUB_LATEST_URL)
-        match = re.search(r"/tag/v?(\d+\.\d+\.\d+)", final_url)
-        if match:
-            return match.group(1), UPDATE_GITHUB_DOWNLOAD_URL
-        match = re.search(r"/releases/tag/v?(\d+\.\d+\.\d+)", body)
-        if match:
-            return match.group(1), UPDATE_GITHUB_DOWNLOAD_URL
+        try:
+            body, final_url = self._text_from_url(UPDATE_GITHUB_LATEST_URL)
+            match = re.search(r"/tag/v?(\d+\.\d+\.\d+)", final_url)
+            if match:
+                return match.group(1), UPDATE_GITHUB_DOWNLOAD_URL
+            match = re.search(r"/releases/tag/v?(\d+\.\d+\.\d+)", body)
+            if match:
+                return match.group(1), UPDATE_GITHUB_DOWNLOAD_URL
+            errors.append("GitHub latest release page did not contain a valid version tag")
+        except Exception as exc:
+            errors.append(f"GitHub failed: {exc}")
 
-        rss_text, _ = self._text_from_url(UPDATE_SOURCEFORGE_RSS_URL)
-        xml_root = ET.fromstring(rss_text)
-        titles = xml_root.findall(".//item/title")
-        for title in titles:
-            if title.text:
-                parsed = _parse_semver(title.text)
-                if parsed is not None:
-                    return f"{parsed[0]}.{parsed[1]}.{parsed[2]}", OFFICIAL_WEBSITE_URL
-        raise RuntimeError("Could not parse latest version from update sources.")
+        try:
+            rss_text, _ = self._text_from_url(UPDATE_SOURCEFORGE_RSS_URL)
+            xml_root = ET.fromstring(rss_text)
+            titles = xml_root.findall(".//item/title")
+            for title in titles:
+                if title.text:
+                    parsed = _parse_semver(title.text)
+                    if parsed is not None:
+                        return f"{parsed[0]}.{parsed[1]}.{parsed[2]}", UPDATE_SOURCEFORGE_DOWNLOAD_URL
+            errors.append("SourceForge RSS did not contain a valid semantic version")
+        except Exception as exc:
+            errors.append(f"SourceForge failed: {exc}")
+
+        raise RuntimeError("Could not parse latest version from update sources. " + "; ".join(errors))
 
     def _trigger_update_check(self, manual: bool) -> None:
         if self._is_shutdown:
@@ -1851,7 +2206,11 @@ class PianoAppController(QObject):
 
     def run(self) -> None:
         self.window.show()
-        QTimer.singleShot(400, self._maybe_prompt_high_quality_soundfont)
+        QTimer.singleShot(400, self._post_startup_prompts)
+
+    def _post_startup_prompts(self) -> None:
+        self._maybe_prompt_legacy_data_migration()
+        self._maybe_prompt_high_quality_soundfont()
 
 
 

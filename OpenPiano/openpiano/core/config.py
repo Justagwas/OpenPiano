@@ -4,13 +4,14 @@ from __future__ import annotations
 from typing import Literal
 
 APP_NAME = "OpenPiano"
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.2"
 OFFICIAL_WEBSITE_URL = "https://www.justagwas.com/projects/openpiano"
 
 UPDATE_CHECK_MANIFEST_URL = "https://www.justagwas.com/projects/openpiano/latest.json"
 UPDATE_GITHUB_LATEST_URL = "https://github.com/Justagwas/OpenPiano/releases/latest"
-UPDATE_GITHUB_DOWNLOAD_URL = "https://www.justagwas.com/projects/a2m/download"
+UPDATE_GITHUB_DOWNLOAD_URL = "https://github.com/Justagwas/OpenPiano/releases/latest/download/OpenPianoSetup.exe"
 UPDATE_SOURCEFORGE_RSS_URL = "https://sourceforge.net/projects/openpiano/rss?path=/"
+UPDATE_SOURCEFORGE_DOWNLOAD_URL = "https://sourceforge.net/projects/openpiano/files/latest/download"
 
 DEFAULT_THEME_MODE: Literal["dark", "light"] = "dark"
 DEFAULT_MASTER_VOLUME = 0.60

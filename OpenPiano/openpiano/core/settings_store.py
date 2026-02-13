@@ -5,7 +5,7 @@ import json
 import os
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
@@ -28,7 +28,7 @@ from openpiano.core.config import (
     UI_SCALE_MIN,
     UI_SCALE_STEP,
 )
-from openpiano.core.keymap import PianoMode
+from openpiano.core.keymap import MIDI_END_88, MIDI_START_88, PianoMode, binding_from_id, binding_to_id
 
 SETTINGS_FILE_NAME = "OpenPiano_config.json"
 ThemeMode = Literal["dark", "light"]
@@ -60,6 +60,8 @@ class AppSettings:
     black_key_color: str = ""
     black_key_pressed_color: str = ""
     hq_soundfont_prompt_seen: bool = False
+    legacy_data_migration_prompt_seen: bool = False
+    custom_keybinds: dict[str, str] = field(default_factory=dict)
 
 
 def _portable_settings_dir() -> Path:
@@ -103,12 +105,16 @@ def _settings_dir() -> Path:
     if _SETTINGS_DIR_CACHE is not None:
         return _SETTINGS_DIR_CACHE
 
+    appdata = _appdata_settings_dir()
+    if appdata is not None and _is_dir_writable(appdata):
+        _SETTINGS_DIR_CACHE = appdata
+        return appdata
+
     portable = _portable_settings_dir()
     if _is_dir_writable(portable):
         _SETTINGS_DIR_CACHE = portable
         return portable
 
-    appdata = _appdata_settings_dir()
     if appdata is not None:
         _SETTINGS_DIR_CACHE = appdata
         return appdata
@@ -121,6 +127,36 @@ def _settings_path(path: Path | None = None) -> Path:
     if path is not None:
         return path
     return _settings_dir() / SETTINGS_FILE_NAME
+
+
+def portable_settings_path() -> Path:
+    return _portable_settings_dir() / SETTINGS_FILE_NAME
+
+
+def appdata_settings_path() -> Path | None:
+    appdata_dir = _appdata_settings_dir()
+    if appdata_dir is None:
+        return None
+    return appdata_dir / SETTINGS_FILE_NAME
+
+
+def migrate_portable_settings_to_appdata(*, overwrite: bool = False) -> bool:
+    source = portable_settings_path()
+    target = appdata_settings_path()
+    if target is None:
+        return False
+    if not source.exists():
+        return False
+    if source.resolve() == target.resolve():
+        return False
+    if target.exists() and not overwrite:
+        return False
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(source.read_bytes())
+    except Exception:
+        return False
+    return True
 
 
 def _clamp_mode(value: Any) -> PianoMode:
@@ -206,14 +242,32 @@ def _clamp_color(value: Any) -> str:
     return ""
 
 
+def _clamp_custom_keybinds(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    parsed: dict[str, str] = {}
+    for note_raw, binding_raw in value.items():
+        if not isinstance(binding_raw, str):
+            continue
+        try:
+            note = int(str(note_raw).strip())
+        except Exception:
+            continue
+        if note < MIDI_START_88 or note > MIDI_END_88:
+            continue
+        normalized = binding_from_id(binding_raw)
+        if normalized is None:
+            continue
+        parsed[str(note)] = binding_to_id(normalized)
+    return parsed
+
+
 def load_settings(path: Path | None = None) -> AppSettings:
     file_path = _settings_path(path)
     if path is None and not file_path.exists():
-        appdata = _appdata_settings_dir()
-        if appdata is not None:
-            fallback = appdata / SETTINGS_FILE_NAME
-            if fallback.exists():
-                file_path = fallback
+        portable_fallback = _portable_settings_dir() / SETTINGS_FILE_NAME
+        if portable_fallback.exists():
+            file_path = portable_fallback
     if not file_path.exists():
         return AppSettings()
     try:
@@ -252,6 +306,8 @@ def load_settings(path: Path | None = None) -> AppSettings:
     black_key_color = _clamp_color(payload.get("black_key_color"))
     black_key_pressed_color = _clamp_color(payload.get("black_key_pressed_color"))
     hq_soundfont_prompt_seen = _clamp_bool(payload.get("hq_soundfont_prompt_seen"), False)
+    legacy_data_migration_prompt_seen = _clamp_bool(payload.get("legacy_data_migration_prompt_seen"), False)
+    custom_keybinds = _clamp_custom_keybinds(payload.get("custom_keybinds"))
     return AppSettings(
         mode=mode,
         instrument_id=instrument_id,
@@ -276,6 +332,8 @@ def load_settings(path: Path | None = None) -> AppSettings:
         black_key_color=black_key_color,
         black_key_pressed_color=black_key_pressed_color,
         hq_soundfont_prompt_seen=hq_soundfont_prompt_seen,
+        legacy_data_migration_prompt_seen=legacy_data_migration_prompt_seen,
+        custom_keybinds=custom_keybinds,
     )
 
 
@@ -309,6 +367,8 @@ def save_settings(settings: AppSettings, path: Path | None = None) -> None:
         "black_key_color": _clamp_color(settings.black_key_color),
         "black_key_pressed_color": _clamp_color(settings.black_key_pressed_color),
         "hq_soundfont_prompt_seen": _clamp_bool(settings.hq_soundfont_prompt_seen, False),
+        "legacy_data_migration_prompt_seen": _clamp_bool(settings.legacy_data_migration_prompt_seen, False),
+        "custom_keybinds": _clamp_custom_keybinds(settings.custom_keybinds),
     }
     raw = json.dumps(payload, indent=2)
 

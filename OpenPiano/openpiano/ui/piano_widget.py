@@ -41,6 +41,7 @@ class PianoWidget(QWidget):
     notePressed = Signal(int)
     noteReleased = Signal(int)
     dragNoteChanged = Signal(object)
+    keybindKeySelected = Signal(int)
 
     def __init__(self, theme: ThemePalette, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -60,6 +61,8 @@ class PianoWidget(QWidget):
         self._pressed_notes: set[int] = set()
         self._mouse_pressed = False
         self._last_drag_note: int | None = None
+        self._keybind_edit_mode = False
+        self._selected_keybind_note: int | None = None
         self._anim_t: dict[int, float] = {}
         self._anim_step: dict[int, float] = {}
         self._anim_timer_id = self.startTimer(16)
@@ -124,11 +127,30 @@ class PianoWidget(QWidget):
         self._mapping = dict(mapping)
         self._labels = dict(labels)
         self._notes = sorted(self._mapping.keys())
+        if self._selected_keybind_note not in self._mapping:
+            self._selected_keybind_note = None
         self._pressed_notes.clear()
         self._anim_t.clear()
         self._anim_step.clear()
         self._rebuild_geometry()
         self.updateGeometry()
+        self.update()
+
+    def set_keybind_edit_mode(self, active: bool, selected_note: int | None = None) -> None:
+        self._keybind_edit_mode = bool(active)
+        self._mouse_pressed = False
+        self._last_drag_note = None
+        if self._keybind_edit_mode:
+            self._selected_keybind_note = selected_note if selected_note in self._mapping else None
+        else:
+            self._selected_keybind_note = None
+        self.update()
+
+    def set_selected_keybind_note(self, note: int | None) -> None:
+        selected = note if isinstance(note, int) and note in self._mapping else None
+        if selected == self._selected_keybind_note:
+            return
+        self._selected_keybind_note = selected
         self.update()
 
     def set_label_visibility(self, show_key_labels: bool, show_note_labels: bool) -> None:
@@ -345,6 +367,15 @@ class PianoWidget(QWidget):
         if outer.intersects(clip_f):
             painter.setPen(QPen(QColor(self._theme.border), 1))
             painter.drawRect(outer)
+
+        selected = self._selected_keybind_note
+        selected_rect = self._rect_by_note.get(selected) if selected is not None else None
+        if self._keybind_edit_mode and selected_rect is not None and selected_rect.intersects(clip_f):
+            accent = QColor(self._theme.accent)
+            accent.setAlpha(55)
+            painter.fillRect(selected_rect.adjusted(1.0, 1.0, -1.0, -1.0), accent)
+            painter.setPen(QPen(QColor(self._theme.accent), 2))
+            painter.drawRect(selected_rect.adjusted(1.0, 1.0, -1.0, -1.0))
         painter.end()
 
     def _draw_labels(self, painter: QPainter, note: int, rect: QRectF, black: bool) -> None:
@@ -482,6 +513,14 @@ class PianoWidget(QWidget):
     def mousePressEvent(self, event: QMouseEvent) -> None:                          
         if event.button() != Qt.LeftButton:
             return super().mousePressEvent(event)
+        if self._keybind_edit_mode:
+            note = self.note_at(event.position().toPoint())
+            self._selected_keybind_note = note
+            if note is not None:
+                self.keybindKeySelected.emit(note)
+            self.update()
+            event.accept()
+            return
         note = self.note_at(event.position().toPoint())
         self._mouse_pressed = True
         self._last_drag_note = note
@@ -490,6 +529,9 @@ class PianoWidget(QWidget):
         event.accept()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:                          
+        if self._keybind_edit_mode:
+            event.accept()
+            return
         note = self.note_at(event.position().toPoint())
         if self._mouse_pressed:
             if note != self._last_drag_note:
@@ -500,6 +542,9 @@ class PianoWidget(QWidget):
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:                          
         if event.button() != Qt.LeftButton:
             return super().mouseReleaseEvent(event)
+        if self._keybind_edit_mode:
+            event.accept()
+            return
         note = self._last_drag_note
         self._mouse_pressed = False
         self._last_drag_note = None
@@ -509,6 +554,9 @@ class PianoWidget(QWidget):
         event.accept()
 
     def leaveEvent(self, event) -> None:                          
+        if self._keybind_edit_mode:
+            super().leaveEvent(event)
+            return
         if self._mouse_pressed:
             self._last_drag_note = None
             self.dragNoteChanged.emit(None)
