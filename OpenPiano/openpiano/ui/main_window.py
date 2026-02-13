@@ -1105,43 +1105,54 @@ class MainWindow(QMainWindow):
     def _build_theme_icon(self, mode: str) -> QIcon:
         if not hasattr(self, "theme_toggle_button"):
             return QIcon()
-        size = max(16, self.theme_toggle_button.iconSize().width())
+        size = max(14, int(self.theme_toggle_button.iconSize().width()))
         screen = QGuiApplication.primaryScreen()
         dpr = float(screen.devicePixelRatio()) if screen is not None else 1.0
         px = int(round(size * dpr))
         icon = QPixmap(px, px)
         icon.setDevicePixelRatio(dpr)
         icon.fill(Qt.transparent)
-
         icon_color = QColor(self.theme.text_primary)
-
         painter = QPainter(icon)
         painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setPen(QPen(icon_color, max(1.1, size * 0.10), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.setBrush(Qt.NoBrush)
+        center = QPointF(size * 0.5, size * 0.5)
 
         if mode == "sun":
-            painter.setPen(QPen(icon_color, 1.8))
-            painter.setBrush(Qt.NoBrush)
-            painter.drawEllipse(5, 5, 8, 8)
-            rays = (
-                (9, 1, 9, 4),
-                (9, 14, 9, 17),
-                (1, 9, 4, 9),
-                (14, 9, 17, 9),
-                (3, 3, 5, 5),
-                (13, 13, 15, 15),
-                (13, 5, 15, 3),
-                (3, 15, 5, 13),
+            orbit_radius = size * 0.22
+            inner_ray = size * 0.34
+            outer_ray = size * 0.46
+            painter.drawEllipse(
+                QPointF(center.x(), center.y()),
+                orbit_radius,
+                orbit_radius,
             )
-            for x1, y1, x2, y2 in rays:
-                painter.drawLine(x1, y1, x2, y2)
+            for direction in (
+                QPointF(1.0, 0.0),
+                QPointF(-1.0, 0.0),
+                QPointF(0.0, 1.0),
+                QPointF(0.0, -1.0),
+                QPointF(0.707, 0.707),
+                QPointF(-0.707, -0.707),
+                QPointF(0.707, -0.707),
+                QPointF(-0.707, 0.707),
+            ):
+                start = QPointF(center.x() + (direction.x() * inner_ray), center.y() + (direction.y() * inner_ray))
+                end = QPointF(center.x() + (direction.x() * outer_ray), center.y() + (direction.y() * outer_ray))
+                painter.drawLine(start, end)
         else:
-            painter.setPen(QPen(icon_color, 1.8))
+            moon_radius = size * 0.38
             painter.setBrush(icon_color)
-            painter.drawEllipse(3, 3, 12, 12)
+            painter.drawEllipse(center, moon_radius, moon_radius)
             painter.setCompositionMode(QPainter.CompositionMode_Clear)
             painter.setPen(Qt.NoPen)
             painter.setBrush(Qt.transparent)
-            painter.drawEllipse(8, 2, 9, 9)
+            painter.drawEllipse(
+                QPointF(center.x() + (size * 0.17), center.y() - (size * 0.10)),
+                size * 0.34,
+                size * 0.34,
+            )
             painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
 
         painter.end()
