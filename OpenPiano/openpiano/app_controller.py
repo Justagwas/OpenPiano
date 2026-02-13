@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import sys
 import threading
 import time
 import urllib.request
@@ -287,8 +288,18 @@ class PianoAppController(QObject):
 
     @staticmethod
     def _default_icon_path() -> Path:
-        root = Path(__file__).resolve().parents[1]
-        return root / "icon.ico"
+        candidates: list[Path] = []
+        if getattr(sys, "frozen", False):
+            meipass = getattr(sys, "_MEIPASS", "")
+            if meipass:
+                candidates.append(Path(meipass) / "icon.ico")
+            candidates.append(Path(sys.executable).resolve().parent / "icon.ico")
+        candidates.append(Path(__file__).resolve().parents[1] / "icon.ico")
+
+        for path in candidates:
+            if path.exists():
+                return path
+        return candidates[-1]
 
     def _connect_signals(self) -> None:
         self.window.modeChanged.connect(self._on_mode_changed)

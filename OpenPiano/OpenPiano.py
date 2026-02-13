@@ -5,7 +5,9 @@ from __future__ import annotations
 import ctypes
 import os
 import sys
+from pathlib import Path
 
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from openpiano.app_controller import PianoAppController
@@ -48,11 +50,28 @@ class SingleInstanceGuard:
         self._handle = None
 
 
+def _resolve_icon_path() -> Path | None:
+    candidates: list[Path] = []
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", "")
+        if meipass:
+            candidates.append(Path(meipass) / "icon.ico")
+        candidates.append(Path(sys.executable).resolve().parent / "icon.ico")
+    candidates.append(Path(__file__).resolve().parent / "icon.ico")
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setApplicationDisplayName(APP_NAME)
     app.setOrganizationName(APP_NAME)
+    icon_path = _resolve_icon_path()
+    if icon_path is not None:
+        app.setWindowIcon(QIcon(str(icon_path)))
     instance_guard = SingleInstanceGuard("OpenPianoMutex")
     if not instance_guard.acquire():
         QMessageBox.information(
@@ -63,7 +82,7 @@ def main() -> int:
         return 0
 
     try:
-        controller = PianoAppController(app)
+        controller = PianoAppController(app, icon_path=icon_path)
         controller.run()
         return app.exec()
     finally:
