@@ -380,7 +380,7 @@ def binding_to_label(binding: Binding, black_key: bool = False) -> str:
     elif shift_symbol_short:
         base = BASE_DIGIT_TO_SHIFTED_SYMBOL[token]
     elif token.isalpha():
-        base = token.upper() if black_key else token.lower()
+        base = token.lower()
     else:
         base = token.upper()
 
@@ -388,7 +388,7 @@ def binding_to_label(binding: Binding, black_key: bool = False) -> str:
         return base
     if source == "keyboard":
         # Keep combo labels compact on keys by stacking modifiers over the base key.
-        combo_base = base.upper() if token.isalpha() else base
+        combo_base = token.upper() if token.isalpha() else base
         return f"{'/'.join(parts)}\n+\n{combo_base}"
     return "+".join(parts + [base])
 
@@ -398,7 +398,12 @@ def binding_to_inline_label(binding: Binding) -> str:
     if source == "keyboard":
         if token in BASE_DIGIT_TO_SHIFTED_SYMBOL and shift and not ctrl and not alt:
             return BASE_DIGIT_TO_SHIFTED_SYMBOL[token]
-        base = token.upper()
+        if token.isalpha():
+            if not ctrl and not shift and not alt:
+                return token.lower()
+            base = token.upper()
+        else:
+            base = token.upper()
     else:
         base = _DISPLAY_KEY_NAMES_VERBOSE.get(token, token.upper())
 
