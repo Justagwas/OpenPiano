@@ -1817,27 +1817,32 @@ class MainWindow(QMainWindow):
             self.resetDefaultsRequested.emit()
 
     def _message_box_stylesheet(self) -> str:
-        button_font = self._sp(10)
         return f"""
-            QMessageBox {{
+            QDialog, QMessageBox {{
                 background: {self.theme.panel_bg};
-            }}
-            QMessageBox QLabel {{
                 color: {self.theme.text_primary};
-                font: 600 {button_font}pt "Segoe UI";
             }}
-            QMessageBox QPushButton {{
-                background: {self.theme.app_bg};
+            QLabel {{
+                color: {self.theme.text_primary};
+                background: transparent;
+            }}
+            QPushButton {{
+                background: {self.theme.panel_bg};
                 color: {self.theme.text_primary};
                 border: 1px solid {self.theme.border};
                 border-radius: 6px;
-                min-width: {self._sp(78)}px;
-                padding: {self._sp(4)}px {self._sp(10)}px;
-                font: 600 {button_font}pt "Segoe UI";
+                padding: 5px 10px;
+                font: 600 9.5pt "Segoe UI";
+                min-height: 24px;
             }}
-            QMessageBox QPushButton:hover {{
+            QPushButton:hover {{
                 background: {self.theme.accent};
                 color: {self.theme.text_primary};
+            }}
+            QPushButton:disabled {{
+                background: {self.theme.panel_bg};
+                color: {self.theme.text_secondary};
+                border-color: {self.theme.border};
             }}
         """
 
@@ -1851,6 +1856,7 @@ class MainWindow(QMainWindow):
         default_button: QMessageBox.StandardButton | None = None,
     ) -> QMessageBox.StandardButton:
         dialog = QMessageBox(self)
+        dialog.setOption(QMessageBox.DontUseNativeDialog, True)
         dialog.setIcon(icon)
         dialog.setWindowTitle(title)
         dialog.setText(str(text))
@@ -1858,6 +1864,9 @@ class MainWindow(QMainWindow):
         dialog.setStandardButtons(buttons)
         if default_button is not None:
             dialog.setDefaultButton(default_button)
+        window_icon = self.windowIcon()
+        if not window_icon.isNull():
+            dialog.setWindowIcon(window_icon)
         dialog.setStyleSheet(self._message_box_stylesheet())
         self._apply_dialog_button_cursors(dialog)
         self._apply_windows_title_bar_theme(dialog)

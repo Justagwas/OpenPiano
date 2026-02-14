@@ -2204,7 +2204,7 @@ class PianoAppController(QObject):
             if manual:
                 self.window.show_info(
                     "Up to Date",
-                    "You are up to date.",
+                    "You are already on the latest version.",
                 )
             return
 
