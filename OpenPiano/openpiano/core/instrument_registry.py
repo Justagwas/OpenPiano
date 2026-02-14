@@ -18,7 +18,8 @@ from openpiano.core.config import (
 
 InstrumentSource = Literal["builtin", "portable", "localappdata"]
 
-FONTS_DIR_NAME = "fonts"
+SOUNDFONTS_DIR_NAME = "soundfonts"
+LEGACY_FONTS_DIR_NAME = "fonts"
 SOUNDFONT_EXTENSIONS = (".sf2", ".sf3")
 SOURCE_ORDER: dict[InstrumentSource, int] = {
     "builtin": 0,
@@ -48,14 +49,24 @@ def resource_root() -> Path:
     return project_root()
 
 
+def _preferred_or_legacy_dir(base: Path) -> Path:
+    preferred = base / SOUNDFONTS_DIR_NAME
+    legacy = base / LEGACY_FONTS_DIR_NAME
+    if preferred.exists() and preferred.is_dir():
+        return preferred
+    return legacy
+
+
 def builtin_fonts_dir() -> Path:
-    return resource_root() / FONTS_DIR_NAME
+    return _preferred_or_legacy_dir(resource_root())
 
 
 def portable_fonts_dir() -> Path:
     if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent / FONTS_DIR_NAME
-    return project_root() / FONTS_DIR_NAME
+        base = Path(sys.executable).resolve().parent
+    else:
+        base = project_root()
+    return _preferred_or_legacy_dir(base)
 
 
 def localappdata_fonts_dir() -> Path:
@@ -74,13 +85,13 @@ def ensure_user_fonts_dir() -> Path:
     return target
 
 
-def ensure_portable_fonts_dir() -> Path:
-    target = portable_fonts_dir()
+def _same_path(left: Path, right: Path) -> bool:
     try:
-        target.mkdir(parents=True, exist_ok=True)
+        left_resolved = left.resolve()
+        right_resolved = right.resolve()
     except Exception:
-        return target
-    return target
+        return os.path.normcase(str(left)) == os.path.normcase(str(right))
+    return os.path.normcase(str(left_resolved)) == os.path.normcase(str(right_resolved))
 
 
 def _clamp_int(value: Any, minimum: int, maximum: int, default: int) -> int:
@@ -138,7 +149,7 @@ def _source_roots() -> list[tuple[InstrumentSource, Path]]:
     portable = portable_fonts_dir()
     local = localappdata_fonts_dir()
     roots: list[tuple[InstrumentSource, Path]] = [("builtin", builtin)]
-    if portable.resolve() != builtin.resolve():
+    if portable.exists() and portable.is_dir() and not _same_path(portable, builtin) and not _same_path(portable, local):
         roots.append(("portable", portable))
     roots.append(("localappdata", local))
     return roots
@@ -176,7 +187,6 @@ def _builtin_priority(item: InstrumentInfo) -> int:
 
 
 def discover_instruments() -> list[InstrumentInfo]:
-    ensure_portable_fonts_dir()
     ensure_user_fonts_dir()
     seen_paths: set[str] = set()
     instruments: list[InstrumentInfo] = []

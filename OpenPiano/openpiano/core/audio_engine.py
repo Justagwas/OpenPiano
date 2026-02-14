@@ -448,6 +448,7 @@ class FluidSynthAudioEngine:
 
     def _discover_available_programs(self, sfid: int, preferred_bank: int = 0) -> dict[int, list[int]]:
         available: dict[int, list[int]] = {}
+        preferred_bank = self._clamp_bank(int(preferred_bank))
         max_bank = max(255, min(16383, preferred_bank + 64))
         empty_bank_run = 0
         found_any = False

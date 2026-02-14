@@ -1230,18 +1230,47 @@ class PianoAppController(QObject):
 
     @staticmethod
     def _portable_font_candidates() -> list[Path]:
-        portable_dir = portable_fonts_dir()
         user_dir = localappdata_fonts_dir()
-        if portable_dir.resolve() == user_dir.resolve():
-            return []
-        if not portable_dir.exists() or not portable_dir.is_dir():
-            return []
+        portable_dir = portable_fonts_dir()
+        candidate_dirs: list[Path] = [portable_dir]
+        if portable_dir.name.lower() == "soundfonts":
+            candidate_dirs.append(portable_dir.parent / "fonts")
+        else:
+            candidate_dirs.append(portable_dir.parent / "soundfonts")
+
         candidates: list[Path] = []
-        for ext in (".sf2", ".sf3"):
-            candidates.extend(portable_dir.glob(f"*{ext}"))
+        seen_dirs: set[str] = set()
+        for candidate_dir in candidate_dirs:
+            try:
+                resolved_dir_key = candidate_dir.resolve()
+                user_dir_key = user_dir.resolve()
+            except Exception:
+                resolved_dir_key = candidate_dir
+                user_dir_key = user_dir
+            resolved_text = str(resolved_dir_key).lower()
+            if resolved_text in seen_dirs:
+                continue
+            seen_dirs.add(resolved_text)
+            if resolved_dir_key == user_dir_key:
+                continue
+            if not candidate_dir.exists() or not candidate_dir.is_dir():
+                continue
+            for ext in (".sf2", ".sf3"):
+                candidates.extend(candidate_dir.glob(f"*{ext}"))
+
         deduped: list[Path] = []
+        seen_files: set[str] = set()
         for path in sorted(candidates, key=lambda item: item.name.lower()):
-            if path.is_file() and path not in deduped:
+            if not path.is_file():
+                continue
+            try:
+                resolved_key = str(path.resolve()).lower()
+            except Exception:
+                resolved_key = str(path).lower()
+            if resolved_key in seen_files:
+                continue
+            seen_files.add(resolved_key)
+            if path not in deduped:
                 deduped.append(path)
         return deduped
 
@@ -2172,11 +2201,10 @@ class PianoAppController(QObject):
             return
 
         if status == "up_to_date":
-            latest = str(result.get("latest", APP_VERSION))
             if manual:
                 self.window.show_info(
                     "Up to Date",
-                    f"You are up to date (v{latest}).",
+                    "You are up to date.",
                 )
             return
 
@@ -2193,27 +2221,48 @@ class PianoAppController(QObject):
         self._is_shutdown = True
         with self._update_lock:
             self._update_check_active = False
+
+        if self._stats_timer.isActive():
+            self._stats_timer.stop()
+        if self._stats_refresh_timer.isActive():
+            self._stats_refresh_timer.stop()
+        if self._sustain_timer.isActive():
+            self._sustain_timer.stop()
+        if self._save_timer.isActive():
+            self._save_timer.stop()
+
         try:
-            if self._stats_timer.isActive():
-                self._stats_timer.stop()
-            if self._stats_refresh_timer.isActive():
-                self._stats_refresh_timer.stop()
-            if self._sustain_timer.isActive():
-                self._sustain_timer.stop()
-            if self._save_timer.isActive():
-                self._save_timer.stop()
             self._midi_manager.close()
+        except Exception:
+            pass
+        try:
             if self._recorder.is_recording:
                 self._record_note_off_for_active_notes()
+        except Exception:
+            pass
+        try:
+            if self._recorder.is_recording:
                 self._recorder.stop()
-            self._recording_started_at = 0.0
-            self._recording_elapsed_seconds = 0
+        except Exception:
+            pass
+        self._recording_started_at = 0.0
+        self._recording_elapsed_seconds = 0
+        try:
             self._set_recording_elapsed_display(0)
+        except Exception:
+            pass
+        try:
             self._stop_all_notes()
+        except Exception:
+            pass
+        try:
             self.audio_engine.shutdown()
+        except Exception:
+            pass
+        try:
             self._persist_settings_now()
         except Exception:
-            return
+            pass
 
     def run(self) -> None:
         self.window.show()
