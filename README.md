@@ -147,7 +147,7 @@ Contributions are welcome.
 
 ## License
 
-Licensed under the Apache License 2.0.
+Licensed under the GNU General Public License v3.0 (GPL-3.0).
 
 See [`LICENSE`](https://github.com/Justagwas/OpenPiano/blob/main/LICENSE).
 
