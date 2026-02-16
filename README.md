@@ -23,7 +23,7 @@
 
 </div>
 
-<p align="center"><b>A lightweight desktop piano you can play instantly with keyboard, mouse, or MIDI</b></p>
+<p align="center"><b>Lightweight desktop piano you can play instantly with keyboard, mouse, or MIDI</b></p>
 
 <p align="center">OpenPiano is a Windows desktop piano instrument for practice, composition and sound design with SoundFonts, real-time controls, and MIDI recording/export</p>
 
