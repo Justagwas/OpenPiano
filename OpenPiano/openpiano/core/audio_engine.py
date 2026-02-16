@@ -1,18 +1,21 @@
 
 from __future__ import annotations
 
-import ctypes.util
-import importlib
-import os
 import sys
 from pathlib import Path
 from typing import Protocol
 
+from openpiano.core.audio_output import default_output_driver, list_output_drivers
+from openpiano.core.fluidsynth_loader import (
+    candidate_dll_dirs,
+    configure_dll_search_paths,
+    ensure_fluidsynth_loaded,
+)
+from openpiano.core.normalize import clamp_float, clamp_int
+from openpiano.core.program_selection import normalize_program_selection
+
 AUDIO_SAMPLE_RATE = 44100
 AUDIO_CHANNEL_COUNT = 128
-
-_fluidsynth_module = None
-_fluidsynth_error: Exception | None = None
 
 
 class AudioEngineProtocol(Protocol):
@@ -50,139 +53,22 @@ class AudioEngineProtocol(Protocol):
     def shutdown(self) -> None:
         ...
 
-
-def _project_root() -> Path:
-    return Path(__file__).resolve().parents[2]
-
-
-def _candidate_dll_dirs() -> list[Path]:
-    candidates: list[Path] = []
-    root = _project_root()
-    if getattr(sys, "frozen", False):
-        exe_dir = Path(sys.executable).resolve().parent
-        candidates.extend([exe_dir / "fluidsynth", exe_dir])
-    candidates.append(root / "third_party" / "fluidsynth" / "bin")
-    deduped: list[Path] = []
-    seen: set[str] = set()
-    for path in candidates:
-        key = os.path.normcase(str(path))
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(path)
-    return deduped
-
-
-def _candidate_dll_names() -> tuple[str, ...]:
-    return (
-        "libfluidsynth-3.dll",
-        "libfluidsynth-2.dll",
-        "libfluidsynth-1.dll",
-        "libfluidsynth.dll",
-        "fluidsynth.dll",
-    )
-
-
-def _find_local_fluidsynth_dll() -> Path | None:
-    for directory in _candidate_dll_dirs():
-        for name in _candidate_dll_names():
-            candidate = directory / name
-            if candidate.exists():
-                return candidate
-    return None
-
-
-def configure_fluidsynth_dll_search_paths() -> list[Path]:
-    if sys.platform != "win32":
-        return []
-
-    added: list[Path] = []
-    for path in _candidate_dll_dirs():
-        if not path.exists():
-            continue
-        try:
-            if hasattr(os, "add_dll_directory"):
-                os.add_dll_directory(str(path))
-        except Exception:
-            pass
-
-        current_path = os.environ.get("PATH", "")
-        parts = current_path.split(os.pathsep) if current_path else []
-        if str(path) not in parts:
-            os.environ["PATH"] = f"{path}{os.pathsep}{current_path}" if current_path else str(path)
-        added.append(path)
-    return added
-
-
-def _import_fluidsynth_module() -> tuple[object | None, Exception | None]:
-    local_dll = _find_local_fluidsynth_dll()
-    original_find_library = ctypes.util.find_library
-    original_add = getattr(os, "add_dll_directory", None)
-
-    def patched_find_library(name: str) -> str | None:
-        normalized = str(name).lower()
-        if local_dll is not None and normalized in {
-            "fluidsynth",
-            "libfluidsynth",
-            "libfluidsynth-1",
-            "libfluidsynth-2",
-            "libfluidsynth-3",
-        }:
-            return str(local_dll)
-        return original_find_library(name)
-
-    def safe_add_dll_directory(path: str) -> object | None:
-        if original_add is None:
-            return None
-        try:
-            return original_add(path)
-        except FileNotFoundError:
-            return None
-
-    try:
-        ctypes.util.find_library = patched_find_library                            
-        if original_add is not None:
-            os.add_dll_directory = safe_add_dll_directory                            
-        module = importlib.import_module("fluidsynth")
-        return module, None
-    except Exception as exc:
-        return None, exc
-    finally:
-        ctypes.util.find_library = original_find_library                            
-        if original_add is not None:
-            os.add_dll_directory = original_add                            
-
-
-def _ensure_fluidsynth_loaded() -> None:
-    global _fluidsynth_module
-    global _fluidsynth_error
-    if _fluidsynth_module is not None:
-        return
-
-    module, error = _import_fluidsynth_module()
-    if module is None:
-        _fluidsynth_error = error
-        return
-    _fluidsynth_module = module
-    _fluidsynth_error = None
-
-
 class SilentAudioEngine:
     
     def note_on(self, midi_note: int, velocity: int = 100) -> None:
-        _ = (midi_note, velocity)
+        return
 
     def note_off(self, midi_note: int) -> None:
-        _ = midi_note
+        return
 
     def all_notes_off(self) -> None:
         return
 
     def set_master_volume(self, volume: float) -> None:
-        _ = volume
+        return
 
     def set_instrument(self, soundfont_path: str, bank: int = 0, preset: int = 0) -> None:
-        _ = (soundfont_path, bank, preset)
+        return
 
     def get_available_programs(self) -> dict[int, list[int]]:
         return {}
@@ -191,13 +77,13 @@ class SilentAudioEngine:
         return 0, 0
 
     def list_output_drivers(self) -> list[str]:
-        return ["dsound", "winmme", "wasapi"] if sys.platform == "win32" else []
+        return list_output_drivers()
 
     def get_output_driver(self) -> str:
-        return "dsound" if sys.platform == "win32" else ""
+        return default_output_driver()
 
     def set_output_driver(self, driver: str) -> None:
-        _ = driver
+        return
 
     def shutdown(self) -> None:
         return
@@ -206,22 +92,23 @@ class SilentAudioEngine:
 class FluidSynthAudioEngine:
     
     def __init__(self, sample_rate: int = AUDIO_SAMPLE_RATE, channels: int = AUDIO_CHANNEL_COUNT) -> None:
-        configure_fluidsynth_dll_search_paths()
-        _ensure_fluidsynth_loaded()
-        if _fluidsynth_module is None:
-            expected_dirs = ", ".join(str(path) for path in _candidate_dll_dirs())
+        configure_dll_search_paths()
+        module, error = ensure_fluidsynth_loaded()
+        if module is None:
+            expected_dirs = ", ".join(str(path) for path in candidate_dll_dirs())
             raise RuntimeError(
                 "pyfluidsynth is required for SoundFont playback. "
-                f"Could not import fluidsynth (error: {_fluidsynth_error}). "
+                f"Could not import fluidsynth (error: {error}). "
                 f"Checked DLL dirs: {expected_dirs}"
             )
-        if not hasattr(_fluidsynth_module, "Synth"):
-            module_path = getattr(_fluidsynth_module, "__file__", "<unknown>")
+        if not hasattr(module, "Synth"):
+            module_path = getattr(module, "__file__", "<unknown>")
             raise RuntimeError(f"Incompatible fluidsynth module without Synth API: {module_path}")
 
         self.sample_rate = int(sample_rate)
         self.channels = max(16, int(channels))
         self.master_volume = 1.0
+        self._fluidsynth_module = module
         self._sfid: int | None = None
         self._soundfont_path: str | None = None
         self._bank = 0
@@ -229,31 +116,29 @@ class FluidSynthAudioEngine:
         self._output_driver = self._default_output_driver()
         self._available_programs: dict[int, list[int]] = {}
         self._active_notes: set[int] = set()
-        self._synth = _fluidsynth_module.Synth(samplerate=float(self.sample_rate))
-                                                                                
-        if hasattr(self._synth, "setting"):
-            try:
-                self._synth.setting("synth.polyphony", int(self.channels))
-            except Exception:
-                pass
+        self._create_synth()
         self._output_driver = self._start_synth(self._output_driver)
         self._set_gain(self.master_volume)
 
     @staticmethod
     def _default_output_driver() -> str:
-        if sys.platform == "win32":
-            return "dsound"
-        return ""
+        return default_output_driver()
 
     def list_output_drivers(self) -> list[str]:
-        if sys.platform == "win32":
-            return ["dsound", "winmme", "wasapi"]
-        return []
+        return list_output_drivers()
 
     def get_output_driver(self) -> str:
         return self._output_driver
 
-    def _start_synth(self, preferred_driver: str | None = None) -> str:
+    def _create_synth(self) -> None:
+        self._synth = self._fluidsynth_module.Synth(samplerate=float(self.sample_rate))
+        if hasattr(self._synth, "setting"):
+            try:
+                self._synth.setting("synth.polyphony", int(self.channels))
+            except Exception:
+                pass
+
+    def _start_driver_attempts(self, preferred_driver: str | None) -> list[dict[str, str]]:
         attempts: list[dict[str, str]] = []
         preferred = str(preferred_driver or "").strip().lower()
         if sys.platform == "win32":
@@ -261,21 +146,21 @@ class FluidSynthAudioEngine:
             ordered.extend(driver for driver in self.list_output_drivers() if driver and driver != preferred)
             attempts.extend([{"driver": driver} for driver in ordered if driver])
         attempts.append({})
+        return attempts
 
+    def _start_synth_with_kwargs(self, kwargs: dict[str, str]) -> str:
+        try:
+            self._synth.start(**kwargs)
+            return str(kwargs.get("driver", "")).strip().lower()
+        except TypeError:
+            self._synth.start()
+            return str(kwargs.get("driver", "")).strip().lower()
+
+    def _start_synth(self, preferred_driver: str | None = None) -> str:
         last_error: Exception | None = None
-        selected = ""
-        for kwargs in attempts:
+        for kwargs in self._start_driver_attempts(preferred_driver):
             try:
-                self._synth.start(**kwargs)
-                selected = str(kwargs.get("driver", "")).strip().lower()
-                return selected
-            except TypeError:
-                try:
-                    self._synth.start()
-                    selected = str(kwargs.get("driver", "")).strip().lower()
-                    return selected
-                except Exception as exc:
-                    last_error = exc
+                return self._start_synth_with_kwargs(kwargs)
             except Exception as exc:
                 last_error = exc
         if last_error is not None:
@@ -284,19 +169,19 @@ class FluidSynthAudioEngine:
 
     @staticmethod
     def _clamp_note(value: int) -> int:
-        return max(0, min(127, int(value)))
+        return clamp_int(value, 0, 127, default=0)
 
     @staticmethod
     def _clamp_velocity(value: int) -> int:
-        return max(1, min(127, int(value)))
+        return clamp_int(value, 1, 127, default=100)
 
     @staticmethod
     def _clamp_bank(value: int) -> int:
-        return max(0, min(16383, int(value)))
+        return clamp_int(value, 0, 16383, default=0)
 
     @staticmethod
     def _clamp_preset(value: int) -> int:
-        return max(0, min(127, int(value)))
+        return clamp_int(value, 0, 127, default=0)
 
     def _set_gain(self, gain: float) -> None:
         if hasattr(self._synth, "set_gain"):
@@ -309,7 +194,7 @@ class FluidSynthAudioEngine:
                 pass
 
     def set_master_volume(self, volume: float) -> None:
-        clamped = max(0.0, min(1.0, float(volume)))
+        clamped = clamp_float(volume, 0.0, 1.0, default=1.0)
         self.master_volume = clamped
         self._set_gain(clamped)
 
@@ -326,7 +211,7 @@ class FluidSynthAudioEngine:
         try:
             new_sfid = int(self._sfload(str(sf_path)))
             available_programs = self._discover_available_programs(new_sfid, preferred_bank=target_bank)
-            selected_bank, selected_preset = self._resolve_program_selection(
+            selected_bank, selected_preset = normalize_program_selection(
                 available_programs,
                 target_bank,
                 target_preset,
@@ -399,12 +284,7 @@ class FluidSynthAudioEngine:
         except Exception:
             pass
 
-        self._synth = _fluidsynth_module.Synth(samplerate=float(self.sample_rate))
-        if hasattr(self._synth, "setting"):
-            try:
-                self._synth.setting("synth.polyphony", int(self.channels))
-            except Exception:
-                pass
+        self._create_synth()
         self._output_driver = self._start_synth(target)
         self._set_gain(master_volume)
         self._active_notes.clear()
@@ -414,37 +294,6 @@ class FluidSynthAudioEngine:
         if soundfont_path and Path(soundfont_path).exists():
             self.set_instrument(soundfont_path, bank=bank, preset=preset)
         self.set_master_volume(master_volume)
-
-    @staticmethod
-    def _nearest_value(candidates: list[int], value: int) -> int:
-        if not candidates:
-            return value
-        return min(candidates, key=lambda item: abs(item - value))
-
-    def _resolve_program_selection(
-        self,
-        available_programs: dict[int, list[int]],
-        requested_bank: int,
-        requested_preset: int,
-    ) -> tuple[int, int]:
-        if not available_programs:
-            return requested_bank, requested_preset
-
-        banks = sorted(available_programs.keys())
-        selected_bank = (
-            requested_bank
-            if requested_bank in available_programs
-            else self._nearest_value(banks, requested_bank)
-        )
-        presets = sorted(available_programs.get(selected_bank, []))
-        if not presets:
-            return selected_bank, requested_preset
-        selected_preset = (
-            requested_preset
-            if requested_preset in presets
-            else self._nearest_value(presets, requested_preset)
-        )
-        return selected_bank, selected_preset
 
     def _discover_available_programs(self, sfid: int, preferred_bank: int = 0) -> dict[int, list[int]]:
         available: dict[int, list[int]] = {}

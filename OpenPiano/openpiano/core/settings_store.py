@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -29,6 +28,7 @@ from openpiano.core.config import (
     UI_SCALE_STEP,
 )
 from openpiano.core.keymap import MIDI_END_88, MIDI_START_88, PianoMode, binding_from_id, binding_to_id
+from openpiano.core.normalize import clamp_float, clamp_int, quantize_step
 
 SETTINGS_FILE_NAME = "OpenPiano_config.json"
 ThemeMode = Literal["dark", "light"]
@@ -60,28 +60,21 @@ class AppSettings:
     black_key_color: str = ""
     black_key_pressed_color: str = ""
     hq_soundfont_prompt_seen: bool = False
-    legacy_data_migration_prompt_seen: bool = False
     custom_keybinds: dict[str, str] = field(default_factory=dict)
-
-
-def _portable_settings_dir() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
-    return Path(__file__).resolve().parents[2]
 
 
 def _appdata_settings_dir() -> Path | None:
     local_app_data = os.environ.get("LOCALAPPDATA")
     if local_app_data:
         return Path(local_app_data) / APP_NAME
-    return None
+    return Path(__file__).resolve().parents[2]
 
 
-def _is_dir_writable(path: Path) -> bool:
+def _ensure_settings_dir(path: Path) -> None:
     try:
         path.mkdir(parents=True, exist_ok=True)
     except Exception:
-        return False
+        return
 
     probe = path / ".openpiano_settings_probe.tmp"
     try:
@@ -93,8 +86,7 @@ def _is_dir_writable(path: Path) -> bool:
                 probe.unlink()
         except Exception:
             pass
-        return False
-    return True
+        return
 
 
 _SETTINGS_DIR_CACHE: Path | None = None
@@ -106,21 +98,11 @@ def _settings_dir() -> Path:
         return _SETTINGS_DIR_CACHE
 
     appdata = _appdata_settings_dir()
-    if appdata is not None and _is_dir_writable(appdata):
-        _SETTINGS_DIR_CACHE = appdata
-        return appdata
-
-    portable = _portable_settings_dir()
-    if _is_dir_writable(portable):
-        _SETTINGS_DIR_CACHE = portable
-        return portable
-
-    if appdata is not None:
-        _SETTINGS_DIR_CACHE = appdata
-        return appdata
-
-    _SETTINGS_DIR_CACHE = portable
-    return portable
+    if appdata is None:
+        appdata = Path(__file__).resolve().parents[2]
+    _ensure_settings_dir(appdata)
+    _SETTINGS_DIR_CACHE = appdata
+    return appdata
 
 
 def _settings_path(path: Path | None = None) -> Path:
@@ -129,46 +111,12 @@ def _settings_path(path: Path | None = None) -> Path:
     return _settings_dir() / SETTINGS_FILE_NAME
 
 
-def portable_settings_path() -> Path:
-    return _portable_settings_dir() / SETTINGS_FILE_NAME
-
-
-def appdata_settings_path() -> Path | None:
-    appdata_dir = _appdata_settings_dir()
-    if appdata_dir is None:
-        return None
-    return appdata_dir / SETTINGS_FILE_NAME
-
-
-def migrate_portable_settings_to_appdata(*, overwrite: bool = False) -> bool:
-    source = portable_settings_path()
-    target = appdata_settings_path()
-    if target is None:
-        return False
-    if not source.exists():
-        return False
-    if source.resolve() == target.resolve():
-        return False
-    if target.exists() and not overwrite:
-        return False
-    try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(source.read_bytes())
-    except Exception:
-        return False
-    return True
-
-
 def _clamp_mode(value: Any) -> PianoMode:
     return value if value in {"61", "88"} else "61"
 
 
 def _clamp_volume(value: Any) -> float:
-    try:
-        parsed = float(value)
-    except Exception:
-        parsed = DEFAULT_MASTER_VOLUME
-    return max(0.0, min(1.0, parsed))
+    return clamp_float(value, 0.0, 1.0, default=DEFAULT_MASTER_VOLUME)
 
 
 def _clamp_bool(value: Any, default: bool) -> bool:
@@ -176,11 +124,7 @@ def _clamp_bool(value: Any, default: bool) -> bool:
 
 
 def _clamp_int(value: Any, default: int, minimum: int, maximum: int) -> int:
-    try:
-        parsed = int(value)
-    except Exception:
-        parsed = default
-    return max(minimum, min(maximum, parsed))
+    return clamp_int(value, minimum, maximum, default=default)
 
 
 def _clamp_transpose(value: Any) -> int:
@@ -196,17 +140,11 @@ def _clamp_velocity(value: Any) -> int:
 
 
 def _quantize_scale(value: float) -> float:
-    steps = round((value - UI_SCALE_MIN) / UI_SCALE_STEP)
-    quantized = UI_SCALE_MIN + (steps * UI_SCALE_STEP)
-    return round(max(UI_SCALE_MIN, min(UI_SCALE_MAX, quantized)), 2)
+    return quantize_step(value, UI_SCALE_MIN, UI_SCALE_MAX, UI_SCALE_STEP, digits=2)
 
 
 def _clamp_ui_scale(value: Any) -> float:
-    try:
-        parsed = float(value)
-    except Exception:
-        parsed = 1.0
-    parsed = max(UI_SCALE_MIN, min(UI_SCALE_MAX, parsed))
+    parsed = clamp_float(value, UI_SCALE_MIN, UI_SCALE_MAX, default=1.0)
     return _quantize_scale(parsed)
 
 
@@ -264,10 +202,6 @@ def _clamp_custom_keybinds(value: Any) -> dict[str, str]:
 
 def load_settings(path: Path | None = None) -> AppSettings:
     file_path = _settings_path(path)
-    if path is None and not file_path.exists():
-        portable_fallback = _portable_settings_dir() / SETTINGS_FILE_NAME
-        if portable_fallback.exists():
-            file_path = portable_fallback
     if not file_path.exists():
         return AppSettings()
     try:
@@ -306,7 +240,6 @@ def load_settings(path: Path | None = None) -> AppSettings:
     black_key_color = _clamp_color(payload.get("black_key_color"))
     black_key_pressed_color = _clamp_color(payload.get("black_key_pressed_color"))
     hq_soundfont_prompt_seen = _clamp_bool(payload.get("hq_soundfont_prompt_seen"), False)
-    legacy_data_migration_prompt_seen = _clamp_bool(payload.get("legacy_data_migration_prompt_seen"), False)
     custom_keybinds = _clamp_custom_keybinds(payload.get("custom_keybinds"))
     return AppSettings(
         mode=mode,
@@ -332,7 +265,6 @@ def load_settings(path: Path | None = None) -> AppSettings:
         black_key_color=black_key_color,
         black_key_pressed_color=black_key_pressed_color,
         hq_soundfont_prompt_seen=hq_soundfont_prompt_seen,
-        legacy_data_migration_prompt_seen=legacy_data_migration_prompt_seen,
         custom_keybinds=custom_keybinds,
     )
 
@@ -367,7 +299,6 @@ def save_settings(settings: AppSettings, path: Path | None = None) -> None:
         "black_key_color": _clamp_color(settings.black_key_color),
         "black_key_pressed_color": _clamp_color(settings.black_key_pressed_color),
         "hq_soundfont_prompt_seen": _clamp_bool(settings.hq_soundfont_prompt_seen, False),
-        "legacy_data_migration_prompt_seen": _clamp_bool(settings.legacy_data_migration_prompt_seen, False),
         "custom_keybinds": _clamp_custom_keybinds(settings.custom_keybinds),
     }
     raw = json.dumps(payload, indent=2)

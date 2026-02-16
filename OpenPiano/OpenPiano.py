@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 
 from openpiano.app_controller import PianoAppController
 from openpiano.core.config import APP_NAME
+from openpiano.core.runtime_paths import icon_path_candidates
 
 
 class SingleInstanceGuard:
@@ -51,13 +52,7 @@ class SingleInstanceGuard:
 
 
 def _resolve_icon_path() -> Path | None:
-    candidates: list[Path] = []
-    if getattr(sys, "frozen", False):
-        meipass = getattr(sys, "_MEIPASS", "")
-        if meipass:
-            candidates.append(Path(meipass) / "icon.ico")
-        candidates.append(Path(sys.executable).resolve().parent / "icon.ico")
-    candidates.append(Path(__file__).resolve().parent / "icon.ico")
+    candidates = icon_path_candidates(extra_dirs=[Path(__file__).resolve().parent])
     for candidate in candidates:
         if candidate.exists():
             return candidate
@@ -67,7 +62,6 @@ def _resolve_icon_path() -> Path | None:
 def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
-    app.setApplicationDisplayName(APP_NAME)
     app.setOrganizationName(APP_NAME)
     icon_path = _resolve_icon_path()
     if icon_path is not None:

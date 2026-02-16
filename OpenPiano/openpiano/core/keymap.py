@@ -5,7 +5,7 @@ from typing import Literal, TypeAlias
 
 BindingSource: TypeAlias = Literal["keyboard", "mouse"]
 Binding: TypeAlias = tuple[BindingSource, str, bool, bool, bool]
-LegacyBinding: TypeAlias = str | tuple[str, str]
+BindingSpec: TypeAlias = str | tuple[str, str]
 PianoMode: TypeAlias = Literal["61", "88"]
 
 MIDI_START_61 = 36
@@ -13,7 +13,7 @@ MIDI_END_61 = 96
 MIDI_START_88 = 21
 MIDI_END_88 = 108
 
-_MIDI_TO_LEGACY_BINDING_88: dict[int, LegacyBinding] = {
+_MIDI_TO_BINDING_SPEC_88: dict[int, BindingSpec] = {
     21: ("ctrl", "1"),
     22: ("ctrl", "2"),
     23: ("ctrl", "3"),
@@ -313,7 +313,7 @@ def build_binding_to_notes(mapping: dict[int, Binding]) -> dict[Binding, tuple[i
     return {binding: tuple(notes) for binding, notes in grouped.items()}
 
 
-def _legacy_to_binding(binding: LegacyBinding) -> Binding:
+def _binding_spec_to_binding(binding: BindingSpec) -> Binding:
     if isinstance(binding, tuple):
         modifier, base = binding
         modifier_value = str(modifier or "").strip().lower()
@@ -338,16 +338,7 @@ def _legacy_to_binding(binding: LegacyBinding) -> Binding:
 
 def get_mode_mapping(mode: PianoMode) -> dict[int, Binding]:
     midi_start, midi_end = MODE_RANGES[mode]
-    return {note: _legacy_to_binding(_MIDI_TO_LEGACY_BINDING_88[note]) for note in range(midi_start, midi_end + 1)}
-
-
-def get_binding_to_midi(mode: PianoMode) -> dict[Binding, int]:
-    mode_map = get_mode_mapping(mode)
-    reverse: dict[Binding, int] = {}
-    for note, binding in mode_map.items():
-        reverse.setdefault(binding, note)
-    return reverse
-
+    return {note: _binding_spec_to_binding(_MIDI_TO_BINDING_SPEC_88[note]) for note in range(midi_start, midi_end + 1)}
 
 def get_note_labels(mode: PianoMode) -> dict[int, str]:
     midi_start, midi_end = MODE_RANGES[mode]
@@ -358,7 +349,7 @@ def is_black_key(midi_note: int) -> bool:
     return midi_note % 12 in BLACK_NOTES
 
 
-def binding_to_label(binding: Binding, black_key: bool = False) -> str:
+def binding_to_label(binding: Binding) -> str:
     source, token, ctrl, shift, alt = binding
     if source == "keyboard" and shift and not ctrl and not alt:
         if token in BASE_DIGIT_TO_SHIFTED_SYMBOL:
@@ -469,20 +460,4 @@ def normalize_key_event(text: str, key_name: str, shift: bool, ctrl: bool, alt: 
         shift=bool(effective_shift),
         alt=bool(alt),
     )
-
-
-def validate_mapping(mode: PianoMode) -> None:
-    midi_start, midi_end = MODE_RANGES[mode]
-    mode_map = get_mode_mapping(mode)
-    expected_notes = set(range(midi_start, midi_end + 1))
-    mapped_notes = set(mode_map.keys())
-
-    if expected_notes != mapped_notes:
-        missing = sorted(expected_notes - mapped_notes)
-        extra = sorted(mapped_notes - expected_notes)
-        raise ValueError(f"Invalid note coverage for mode {mode}. Missing={missing}, extra={extra}")
-
-    reverse = get_binding_to_midi(mode)
-    if len(reverse) != len(mode_map):
-        raise ValueError(f"Duplicate key bindings detected for mode {mode}")
 

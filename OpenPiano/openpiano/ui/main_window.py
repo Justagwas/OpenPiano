@@ -1,12 +1,11 @@
-
 from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, Signal, QTimer
-from PySide6.QtGui import QColor, QGuiApplication, QIcon, QPainter, QPalette, QPen, QPixmap
+from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, Signal, QTimer
+from PySide6.QtGui import QColor, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -18,7 +17,6 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
-    QListView,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -26,13 +24,6 @@ from PySide6.QtWidgets import (
     QSlider,
     QSizePolicy,
     QScrollBar,
-    QStyle,
-    QStyleOptionButton,
-    QStyleOptionComboBox,
-    QStyleOptionViewItem,
-    QStyleOptionSlider,
-    QStyledItemDelegate,
-    QProxyStyle,
     QVBoxLayout,
     QWidget,
 )
@@ -44,10 +35,18 @@ from openpiano.core.config import (
     UI_SCALE_MIN,
     UI_SCALE_STEP,
 )
+from openpiano.core.object_tree import is_descendant_of
 from openpiano.core.theme import ThemePalette
+from openpiano.ui.modal_utils import (
+    apply_dialog_button_cursors as apply_dialog_button_cursors_util,
+    clear_override_cursors as clear_override_cursors_util,
+    message_box_stylesheet as message_box_stylesheet_util,
+)
 from openpiano.ui.piano_widget import PianoWidget
 from openpiano.ui.spotlight_overlay import SpotlightOverlay
 from openpiano.ui.stats_bar import StatsBar
+from openpiano.ui.styled_controls import ChevronComboBox, RoundHandleSliderStyle, SquareCheckBoxStyle
+from openpiano.ui.theme_icons import build_theme_icon
 from openpiano.ui.tutorial_overlay import TutorialOverlay
 
 if TYPE_CHECKING:
@@ -64,371 +63,6 @@ ANIMATION_SPEED_LABELS = {
     "very_slow": "Very Slow",
 }
 
-
-class RoundHandleSliderStyle(QProxyStyle):
-    
-    def __init__(
-        self,
-        *,
-        handle_color: str,
-        border_color: str,
-        groove_color: str,
-        fill_color: str,
-        handle_size: int = 18,
-        groove_height: int = 6,
-        parent: QWidget | None = None,
-    ) -> None:
-                                                                                          
-        super().__init__()
-        self._handle_color = QColor(handle_color)
-        self._border_color = QColor(border_color)
-        self._groove_color = QColor(groove_color)
-        self._fill_color = QColor(fill_color)
-        self._handle_size = max(12, int(handle_size))
-        self._groove_height = max(4, int(groove_height))
-
-    def set_colors(self, *, handle_color: str, border_color: str, groove_color: str, fill_color: str) -> None:
-        self._handle_color = QColor(handle_color)
-        self._border_color = QColor(border_color)
-        self._groove_color = QColor(groove_color)
-        self._fill_color = QColor(fill_color)
-
-    def set_metrics(self, *, handle_size: int, groove_height: int) -> None:
-        self._handle_size = max(12, int(handle_size))
-        self._groove_height = max(4, int(groove_height))
-
-    def pixelMetric(self, metric, option=None, widget=None):                          
-        if metric == QStyle.PixelMetric.PM_SliderLength:
-            return self._handle_size
-        if metric == QStyle.PixelMetric.PM_SliderThickness:
-            return max(self._handle_size + 6, self._groove_height + 10)
-        return super().pixelMetric(metric, option, widget)
-
-    def _handle_diameter(self) -> int:
-        return self._handle_size
-
-    def _groove_rect(self, option: QStyleOptionSlider, widget: QWidget | None) -> QRect:
-        diameter = self._handle_diameter()
-        groove_h = self._groove_height
-        inset = max(1, diameter // 2)
-        width = max(2, int(option.rect.width()) - (inset * 2))
-        x = int(option.rect.left()) + inset
-        y = int(option.rect.center().y() - (groove_h // 2))
-        return QRect(x, y, width, groove_h)
-
-    def _handle_rect(self, option: QStyleOptionSlider, widget: QWidget | None) -> QRect:
-        groove = self._groove_rect(option, widget)
-        diameter = self._handle_diameter()
-        available = max(0, groove.width() - diameter)
-        pos = QStyle.sliderPositionFromValue(
-            int(option.minimum),
-            int(option.maximum),
-            int(option.sliderPosition),
-            int(available),
-            bool(option.upsideDown),
-        )
-        x = int(groove.left()) + int(pos)
-        y = int(groove.center().y() - (diameter // 2))
-        return QRect(x, y, diameter, diameter)
-
-    def subControlRect(self, control, option, sub_control, widget=None):                          
-        if control == QStyle.ComplexControl.CC_Slider and isinstance(option, QStyleOptionSlider):
-            if option.orientation == Qt.Horizontal:
-                if sub_control == QStyle.SubControl.SC_SliderGroove:
-                    return self._groove_rect(option, widget)
-                if sub_control == QStyle.SubControl.SC_SliderHandle:
-                    return self._handle_rect(option, widget)
-        return super().subControlRect(control, option, sub_control, widget)
-
-    def drawComplexControl(self, control, option, painter, widget=None):                          
-        if control != QStyle.ComplexControl.CC_Slider or not isinstance(option, QStyleOptionSlider):
-            super().drawComplexControl(control, option, painter, widget)
-            return
-        if option.orientation != Qt.Horizontal:
-            super().drawComplexControl(control, option, painter, widget)
-            return
-
-        groove = self._groove_rect(option, widget)
-        handle = self._handle_rect(option, widget)
-        radius = max(2.0, groove.height() / 2.0)
-
-        painter.save()
-        painter.setRenderHint(QPainter.Antialiasing, True)
-
-                    
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(self._groove_color)
-        painter.drawRoundedRect(QRectF(groove), radius, radius)
-
-                                            
-        if handle.isValid():
-            if option.upsideDown:
-                fill_left = float(handle.center().x())
-                fill_width = float(groove.right() - handle.center().x())
-            else:
-                fill_left = float(groove.left())
-                fill_width = float(handle.center().x() - groove.left())
-            if fill_width > 0:
-                fill_rect = QRectF(fill_left, float(groove.top()), fill_width, float(groove.height()))
-                painter.setBrush(self._fill_color)
-                painter.drawRoundedRect(fill_rect, radius, radius)
-
-                         
-        if handle.isValid():
-            circle_rect = QRectF(handle)
-            painter.setBrush(self._handle_color)
-            painter.setPen(QPen(self._border_color, max(1, int(round(self._handle_size / 16)))))
-            painter.drawEllipse(circle_rect)
-
-        painter.restore()
-
-
-class SquareCheckBoxStyle(QProxyStyle):
-    
-    def __init__(
-        self,
-        *,
-        border_color: str,
-        fill_color: str,
-        check_color: str,
-        size: int = 16,
-        radius: int = 4,
-        parent: QWidget | None = None,
-    ) -> None:
-                                                                                          
-        super().__init__()
-        self._border_color = QColor(border_color)
-        self._fill_color = QColor(fill_color)
-        self._check_color = QColor(check_color)
-        self._size = max(12, int(size))
-        self._radius = max(2, int(radius))
-
-    def set_colors(self, *, border_color: str, fill_color: str, check_color: str) -> None:
-        self._border_color = QColor(border_color)
-        self._fill_color = QColor(fill_color)
-        self._check_color = QColor(check_color)
-
-    def set_metrics(self, *, size: int, radius: int) -> None:
-        self._size = max(12, int(size))
-        self._radius = max(2, int(radius))
-
-    def pixelMetric(self, metric, option=None, widget=None):                          
-        if metric in {QStyle.PixelMetric.PM_IndicatorWidth, QStyle.PixelMetric.PM_IndicatorHeight}:
-            return self._size
-        return super().pixelMetric(metric, option, widget)
-
-    def _indicator_rect(self, option) -> QRect:
-                                                                             
-        left = int(option.rect.left()) + 2
-        top = int(option.rect.center().y() - (self._size // 2))
-        return QRect(left, top, self._size, self._size)
-
-    def subElementRect(self, element, option, widget=None):                          
-        if isinstance(option, QStyleOptionButton):
-            if element == QStyle.SubElement.SE_CheckBoxIndicator:
-                return self._indicator_rect(option)
-            if element == QStyle.SubElement.SE_CheckBoxContents:
-                indicator = self._indicator_rect(option)
-                gap = 6
-                left = int(indicator.right() + 1 + gap)
-                width = max(0, int(option.rect.right()) - left + 1)
-                return QRect(left, int(option.rect.top()), width, int(option.rect.height()))
-        return super().subElementRect(element, option, widget)
-
-    def drawPrimitive(self, element, option, painter, widget=None):                          
-        if element != QStyle.PrimitiveElement.PE_IndicatorCheckBox:
-            super().drawPrimitive(element, option, painter, widget)
-            return
-
-                                                                                    
-        rect = option.rect.adjusted(1, 1, -2, -2)
-        checked = bool(option.state & QStyle.StateFlag.State_On)
-        enabled = bool(option.state & QStyle.StateFlag.State_Enabled)
-        border = QColor(self._border_color)
-        fill = QColor(self._fill_color if checked else "transparent")
-        check = QColor(self._check_color)
-
-        if not enabled:
-            border.setAlpha(130)
-            fill.setAlpha(110 if checked else 0)
-            check.setAlpha(170)
-
-        painter.save()
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        painter.setPen(QPen(border, 1))
-        painter.setBrush(fill)
-        painter.drawRoundedRect(QRectF(rect), float(self._radius), float(self._radius))
-
-        if checked:
-            pen_w = max(2, int(round(self._size / 9)))
-            pen = QPen(check, pen_w, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
-            painter.setPen(pen)
-            x = float(rect.x())
-            y = float(rect.y())
-            w = float(rect.width())
-            h = float(rect.height())
-            p1 = QPointF(x + w * 0.24, y + h * 0.56)
-            p2 = QPointF(x + w * 0.44, y + h * 0.74)
-            p3 = QPointF(x + w * 0.78, y + h * 0.34)
-            painter.drawLine(p1, p2)
-            painter.drawLine(p2, p3)
-        painter.restore()
-
-
-class ComboPopupDelegate(QStyledItemDelegate):
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        palette = parent.palette() if isinstance(parent, QWidget) else QApplication.palette()
-        self._accent = QColor("#D20F39")
-        self._text_color = QColor(palette.color(QPalette.Text))
-        self._panel_bg = QColor(palette.color(QPalette.Base))
-        hover_candidate = QColor(palette.color(QPalette.AlternateBase))
-        self._hover_bg = hover_candidate if hover_candidate.isValid() else QColor(self._panel_bg).darker(108)
-        self._selected_bg = QColor(self._accent)
-        self._selected_bg.setAlpha(42)
-
-    def set_colors(self, *, accent: str, text: str, panel: str, hover: str) -> None:
-        self._accent = QColor(accent)
-        self._text_color = QColor(text)
-        self._panel_bg = QColor(panel)
-        self._hover_bg = QColor(hover)
-        self._selected_bg = QColor(accent)
-        self._selected_bg.setAlpha(42)
-
-    def paint(self, painter, option, index) -> None:                          
-        opt = QStyleOptionViewItem(option)
-        self.initStyleOption(opt, index)
-        rect = opt.rect
-        if not rect.isValid():
-            return
-
-        state = opt.state
-        is_selected = bool(state & QStyle.StateFlag.State_Selected)
-        is_hovered = bool(state & QStyle.StateFlag.State_MouseOver)
-        is_enabled = bool(state & QStyle.StateFlag.State_Enabled)
-
-        painter.save()
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        painter.setPen(Qt.NoPen)
-        if is_selected:
-            painter.setBrush(self._selected_bg)
-        elif is_hovered:
-            painter.setBrush(self._hover_bg)
-        else:
-            painter.setBrush(self._panel_bg)
-        painter.drawRect(rect)
-
-        left_pad = 8
-        if is_selected:
-            marker_width = max(3, int(round(rect.height() * 0.10)))
-            marker_rect = QRect(
-                int(rect.left() + 2),
-                int(rect.top() + 4),
-                marker_width,
-                max(2, int(rect.height() - 8)),
-            )
-            painter.setBrush(self._accent)
-            painter.drawRoundedRect(QRectF(marker_rect), marker_width / 2.0, marker_width / 2.0)
-            left_pad += marker_width + 5
-
-        text_rect = rect.adjusted(left_pad, 0, -6, 0)
-        text_color = QColor(self._text_color)
-        if not is_enabled:
-            text_color.setAlpha(145)
-        painter.setPen(text_color)
-        font = opt.font
-        font.setBold(True)
-        painter.setFont(font)
-        text = opt.fontMetrics.elidedText(str(opt.text or ""), Qt.TextElideMode.ElideRight, max(1, text_rect.width()))
-        painter.drawText(text_rect, int(Qt.AlignVCenter | Qt.AlignLeft), text)
-        painter.restore()
-
-    def sizeHint(self, option, index):                          
-        hint = super().sizeHint(option, index)
-        hint.setHeight(max(24, hint.height()))
-        return hint
-
-
-class ChevronComboBox(QComboBox):
-    popupAboutToShow = Signal()
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._arrow_idle = QColor("#B7B7BC")
-        self._arrow_active = QColor("#F4F4F5")
-        self._popup_delegate = ComboPopupDelegate(self)
-        popup_view = QListView(self)
-        popup_view.setUniformItemSizes(True)
-        popup_view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        popup_view.setMouseTracking(True)
-        if popup_view.viewport() is not None:
-            popup_view.viewport().setAutoFillBackground(True)
-            popup_view.viewport().setMouseTracking(True)
-        popup_view.setItemDelegate(self._popup_delegate)
-        self.setView(popup_view)
-
-    def set_arrow_colors(self, idle: str, active: str) -> None:
-        self._arrow_idle = QColor(idle)
-        self._arrow_active = QColor(active)
-        self.update()
-
-    def set_popup_colors(self, *, accent: str, text: str, panel: str, hover: str) -> None:
-        self._popup_delegate.set_colors(accent=accent, text=text, panel=panel, hover=hover)
-        view = self.view()
-        if view is None:
-            return
-        palette = view.palette()
-        palette.setColor(QPalette.Base, QColor(panel))
-        palette.setColor(QPalette.Text, QColor(text))
-        palette.setColor(QPalette.Highlight, QColor(accent))
-        palette.setColor(QPalette.HighlightedText, QColor(text))
-        view.setPalette(palette)
-        if view.viewport() is not None:
-            view.viewport().setPalette(palette)
-            view.viewport().update()
-
-    def paintEvent(self, event) -> None:                          
-        super().paintEvent(event)
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing, True)
-
-        is_open = False
-        try:
-            view = self.view()
-            is_open = bool(view.isVisible()) if view is not None else False
-        except Exception:
-            is_open = False
-
-        color = self._arrow_active if (self.hasFocus() or is_open) else self._arrow_idle
-        pen_width = max(1, int(round(self.height() / 12)))
-        pen = QPen(color, pen_width, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
-        painter.setPen(pen)
-
-        option = QStyleOptionComboBox()
-        self.initStyleOption(option)
-        arrow_rect = self.style().subControlRect(
-            QStyle.ComplexControl.CC_ComboBox,
-            option,
-            QStyle.SubControl.SC_ComboBoxArrow,
-            self,
-        )
-        if not arrow_rect.isValid():
-            return
-
-        cx = arrow_rect.center().x()
-        cy = arrow_rect.center().y()
-        span = max(3, int(round(min(arrow_rect.width(), arrow_rect.height()) * 0.22)))
-
-        if is_open:
-            painter.drawLine(cx - span, cy + (span // 2), cx, cy - (span // 2))
-            painter.drawLine(cx, cy - (span // 2), cx + span, cy + (span // 2))
-        else:
-            painter.drawLine(cx - span, cy - (span // 2), cx, cy + (span // 2))
-            painter.drawLine(cx, cy + (span // 2), cx + span, cy - (span // 2))
-
-    def showPopup(self) -> None:                          
-        self.popupAboutToShow.emit()
-        super().showPopup()
 
 class MainWindow(QMainWindow):
     
@@ -486,8 +120,16 @@ class MainWindow(QMainWindow):
         self._ui_scale_commit_timer.setSingleShot(True)
         self._ui_scale_commit_timer.setInterval(120)
         self._ui_scale_commit_timer.timeout.connect(self._commit_ui_scale_if_changed)
+        self._layout_refresh_timer = QTimer(self)
+        self._layout_refresh_timer.setSingleShot(True)
+        self._layout_refresh_timer.setInterval(0)
+        self._layout_refresh_timer.timeout.connect(self.refresh_fixed_size)
         self._slider_styles: list[RoundHandleSliderStyle] = []
         self._checkbox_styles: list[SquareCheckBoxStyle] = []
+        self._wheel_allowed_widgets: tuple[QWidget, ...] = ()
+        self._wheel_allowed_widget_ids: set[int] = set()
+        self._global_event_filter_installed = False
+        self._last_stylesheet = ""
         self._key_color_values: dict[str, str] = {
             "white_key": "",
             "white_key_pressed": "",
@@ -579,69 +221,46 @@ class MainWindow(QMainWindow):
         self.sound_card, sound_layout = self._create_section_card("Sound", self.settings_body)
         layout.addWidget(self.sound_card)
 
-        sound_volume_row = QHBoxLayout()
-        self._configure_settings_row(sound_volume_row)
-        sound_volume_label = QLabel("Volume", self.sound_card)
-        sound_volume_label.setObjectName("settingLabel")
-        self.volume_slider = QSlider(Qt.Horizontal, self.sound_card)
-        self.volume_slider.setObjectName("volumeSlider")
-        self.volume_slider.setRange(0, 100)
-        self.volume_slider.setValue(60)
-        self.volume_slider.valueChanged.connect(self._on_volume_value_changed)
-        self.volume_value = QLabel("60%", self.sound_card)
-        self.volume_value.setObjectName("settingValue")
-        sound_volume_row.addWidget(sound_volume_label)
-        sound_volume_row.addWidget(self.volume_slider, 1)
-        sound_volume_row.addWidget(self.volume_value)
-        sound_layout.addLayout(sound_volume_row)
-
-        velocity_row = QHBoxLayout()
-        self._configure_settings_row(velocity_row)
-        velocity_label = QLabel("Velocity", self.sound_card)
-        velocity_label.setObjectName("settingLabel")
-        self.velocity_slider = QSlider(Qt.Horizontal, self.sound_card)
-        self.velocity_slider.setObjectName("velocitySlider")
-        self.velocity_slider.setRange(1, 127)
-        self.velocity_slider.setValue(100)
-        self.velocity_slider.valueChanged.connect(self._on_velocity_value_changed)
-        self.velocity_value = QLabel("100", self.sound_card)
-        self.velocity_value.setObjectName("settingValue")
-        velocity_row.addWidget(velocity_label)
-        velocity_row.addWidget(self.velocity_slider, 1)
-        velocity_row.addWidget(self.velocity_value)
-        sound_layout.addLayout(velocity_row)
-
-        transpose_row = QHBoxLayout()
-        self._configure_settings_row(transpose_row)
-        transpose_label = QLabel("Transpose", self.sound_card)
-        transpose_label.setObjectName("settingLabel")
-        self.transpose_slider = QSlider(Qt.Horizontal, self.sound_card)
-        self.transpose_slider.setObjectName("transposeSlider")
-        self.transpose_slider.setRange(-21, 21)
-        self.transpose_slider.setValue(0)
-        self.transpose_slider.valueChanged.connect(self._on_transpose_value_changed)
-        self.transpose_value = QLabel("+0", self.sound_card)
-        self.transpose_value.setObjectName("settingValue")
-        transpose_row.addWidget(transpose_label)
-        transpose_row.addWidget(self.transpose_slider, 1)
-        transpose_row.addWidget(self.transpose_value)
-        sound_layout.addLayout(transpose_row)
-
-        sustain_row = QHBoxLayout()
-        self._configure_settings_row(sustain_row)
-        sustain_label = QLabel("Sustain %", self.sound_card)
-        sustain_label.setObjectName("settingLabel")
-        self.sustain_slider = QSlider(Qt.Horizontal, self.sound_card)
-        self.sustain_slider.setObjectName("sustainSlider")
-        self.sustain_slider.setRange(0, 100)
-        self.sustain_slider.setValue(100)
-        self.sustain_slider.valueChanged.connect(self._on_sustain_percent_changed)
-        self.sustain_value = QLabel("100%", self.sound_card)
-        self.sustain_value.setObjectName("settingValue")
-        sustain_row.addWidget(sustain_label)
-        sustain_row.addWidget(self.sustain_slider, 1)
-        sustain_row.addWidget(self.sustain_value)
-        sound_layout.addLayout(sustain_row)
+        self.volume_slider, self.volume_value = self._add_labeled_slider_row(
+            self.sound_card,
+            sound_layout,
+            label_text="Volume",
+            slider_object_name="volumeSlider",
+            slider_range=(0, 100),
+            slider_value=60,
+            value_text="60%",
+            on_value_changed=self._on_volume_value_changed,
+        )
+        self.velocity_slider, self.velocity_value = self._add_labeled_slider_row(
+            self.sound_card,
+            sound_layout,
+            label_text="Velocity",
+            slider_object_name="velocitySlider",
+            slider_range=(1, 127),
+            slider_value=100,
+            value_text="100",
+            on_value_changed=self._on_velocity_value_changed,
+        )
+        self.transpose_slider, self.transpose_value = self._add_labeled_slider_row(
+            self.sound_card,
+            sound_layout,
+            label_text="Transpose",
+            slider_object_name="transposeSlider",
+            slider_range=(-21, 21),
+            slider_value=0,
+            value_text="+0",
+            on_value_changed=self._on_transpose_value_changed,
+        )
+        self.sustain_slider, self.sustain_value = self._add_labeled_slider_row(
+            self.sound_card,
+            sound_layout,
+            label_text="Sustain %",
+            slider_object_name="sustainSlider",
+            slider_range=(0, 100),
+            slider_value=100,
+            value_text="100%",
+            on_value_changed=self._on_sustain_percent_changed,
+        )
 
         self.keyboard_card, keyboard_layout = self._create_section_card("Keyboard", self.settings_body)
         layout.addWidget(self.keyboard_card)
@@ -740,26 +359,21 @@ class MainWindow(QMainWindow):
         self.interface_card, interface_layout = self._create_section_card("Interface", self.settings_body)
         layout.addWidget(self.interface_card)
 
-        ui_size_row = QHBoxLayout()
-        self._configure_settings_row(ui_size_row)
-        ui_size_label = QLabel("UI Size", self.interface_card)
-        ui_size_label.setObjectName("settingLabel")
-        self.ui_scale_slider = QSlider(Qt.Horizontal, self.interface_card)
-        self.ui_scale_slider.setObjectName("uiScaleSlider")
-        self.ui_scale_slider.setRange(0, self._ui_scale_steps)
+        self.ui_scale_slider, self.ui_scale_value = self._add_labeled_slider_row(
+            self.interface_card,
+            interface_layout,
+            label_text="UI Size",
+            slider_object_name="uiScaleSlider",
+            slider_range=(0, self._ui_scale_steps),
+            slider_value=int(round((1.0 - UI_SCALE_MIN) / UI_SCALE_STEP)),
+            value_text="100%",
+            on_value_changed=self._on_ui_scale_value_changed,
+        )
         self.ui_scale_slider.setSingleStep(1)
         self.ui_scale_slider.setPageStep(1)
         self.ui_scale_slider.setTracking(True)
-        self.ui_scale_slider.setValue(int(round((1.0 - UI_SCALE_MIN) / UI_SCALE_STEP)))
-        self.ui_scale_slider.valueChanged.connect(self._on_ui_scale_value_changed)
         self.ui_scale_slider.sliderPressed.connect(self._on_ui_scale_slider_pressed)
         self.ui_scale_slider.sliderReleased.connect(self._on_ui_scale_slider_released)
-        self.ui_scale_value = QLabel("100%", self.interface_card)
-        self.ui_scale_value.setObjectName("settingValue")
-        ui_size_row.addWidget(ui_size_label)
-        ui_size_row.addWidget(self.ui_scale_slider, 1)
-        ui_size_row.addWidget(self.ui_scale_value)
-        interface_layout.addLayout(ui_size_row)
 
         anim_row = QHBoxLayout()
         self._configure_settings_row(anim_row)
@@ -918,6 +532,35 @@ class MainWindow(QMainWindow):
         row.setContentsMargins(6, self._sp(4), 6, self._sp(4))
         row.setSpacing(self._sp(8))
 
+    def _add_labeled_slider_row(
+        self,
+        parent: QWidget,
+        section_layout: QVBoxLayout,
+        *,
+        label_text: str,
+        slider_object_name: str,
+        slider_range: tuple[int, int],
+        slider_value: int,
+        value_text: str,
+        on_value_changed: Callable[[int], None],
+    ) -> tuple[QSlider, QLabel]:
+        row = QHBoxLayout()
+        self._configure_settings_row(row)
+        label = QLabel(label_text, parent)
+        label.setObjectName("settingLabel")
+        slider = QSlider(Qt.Horizontal, parent)
+        slider.setObjectName(slider_object_name)
+        slider.setRange(int(slider_range[0]), int(slider_range[1]))
+        slider.setValue(int(slider_value))
+        slider.valueChanged.connect(on_value_changed)
+        value_label = QLabel(value_text, parent)
+        value_label.setObjectName("settingValue")
+        row.addWidget(label)
+        row.addWidget(slider, 1)
+        row.addWidget(value_label)
+        section_layout.addLayout(row)
+        return slider, value_label
+
     def _configure_controls_row(self, row: QHBoxLayout) -> None:
         row.setContentsMargins(4, self._sp(2), 4, self._sp(2))
         row.setSpacing(self._sp(6))
@@ -989,6 +632,13 @@ class MainWindow(QMainWindow):
         self.recording_timer_label.setMaximumHeight(controls_row_height)
         self.save_recording_button.setMinimumHeight(controls_row_height)
         self.save_recording_button.setMaximumHeight(controls_row_height)
+        footer_layout = getattr(self, "_footer_layout", None)
+        if isinstance(footer_layout, QHBoxLayout):
+            footer_layout.setContentsMargins(self._sp(6), 0, self._sp(6), 0)
+            footer_layout.setSpacing(self._sp(8))
+        if hasattr(self, "theme_toggle_button"):
+            icon_px = max(12, self._sp(14))
+            self.theme_toggle_button.setIconSize(QSize(icon_px, icon_px))
         QTimer.singleShot(0, self._sync_all_notes_off_width)
 
     def _create_section_card(self, title: str, parent: QWidget) -> tuple[QFrame, QVBoxLayout]:
@@ -1002,17 +652,20 @@ class MainWindow(QMainWindow):
         card_layout.addWidget(header)
         return card, card_layout
 
-    def _install_slider_styles(self) -> None:
-        self._slider_styles.clear()
-        handle_size = max(12, min(36, self._sp(18)))
-        groove_height = max(4, min(14, self._sp(6)))
-        for slider in (
+    def _setting_sliders(self) -> tuple[QSlider, ...]:
+        return (
             self.volume_slider,
             self.velocity_slider,
             self.transpose_slider,
             self.sustain_slider,
             self.ui_scale_slider,
-        ):
+        )
+
+    def _install_slider_styles(self) -> None:
+        self._slider_styles.clear()
+        handle_size = max(12, min(36, self._sp(18)))
+        groove_height = max(4, min(14, self._sp(6)))
+        for slider in self._setting_sliders():
             style = RoundHandleSliderStyle(
                 handle_color=self.theme.text_primary,
                 border_color=self.theme.border,
@@ -1020,7 +673,6 @@ class MainWindow(QMainWindow):
                 fill_color=self.theme.accent,
                 handle_size=handle_size,
                 groove_height=groove_height,
-                parent=slider,
             )
             slider.setStyle(style)
             self._slider_styles.append(style)
@@ -1036,13 +688,7 @@ class MainWindow(QMainWindow):
                 fill_color=self.theme.accent,
             )
             style.set_metrics(handle_size=handle_size, groove_height=groove_height)
-        for slider in (
-            self.volume_slider,
-            self.velocity_slider,
-            self.transpose_slider,
-            self.sustain_slider,
-            self.ui_scale_slider,
-        ):
+        for slider in self._setting_sliders():
             slider.update()
 
     def _install_checkbox_styles(self) -> None:
@@ -1056,7 +702,6 @@ class MainWindow(QMainWindow):
                 check_color=self.theme.text_primary,
                 size=size,
                 radius=radius,
-                parent=checkbox,
             )
             checkbox.setStyle(style)
             self._checkbox_styles.append(style)
@@ -1077,18 +722,10 @@ class MainWindow(QMainWindow):
     def _build_footer(self, outer: QVBoxLayout) -> None:
         self.footer_bar = QFrame(self.centralWidget())
         self.footer_bar.setObjectName("footerBar")
-        footer_layout = QVBoxLayout(self.footer_bar)
-        footer_layout.setContentsMargins(0, 0, 0, 0)
-        footer_layout.setSpacing(self._sp(4))
-
-        divider = QFrame(self.footer_bar)
-        divider.setObjectName("footerDivider")
-        divider.setFixedHeight(1)
-        footer_layout.addWidget(divider)
-
-        row = QHBoxLayout()
-        row.setContentsMargins(self._sp(2), 0, self._sp(2), 0)
-        row.setSpacing(self._sp(10))
+        row = QHBoxLayout(self.footer_bar)
+        row.setContentsMargins(self._sp(6), 0, self._sp(6), 0)
+        row.setSpacing(self._sp(8))
+        self._footer_layout = row
 
         self.theme_toggle_button = QPushButton("", self.footer_bar)
         self.theme_toggle_button.setObjectName("footerIcon")
@@ -1133,71 +770,19 @@ class MainWindow(QMainWindow):
         row.addWidget(self.theme_toggle_button)
         row.addWidget(self.settings_toggle_button)
         row.addWidget(self.stats_toggle_button)
-        row.addStretch(1)
         row.addWidget(self.controls_toggle_button)
         row.addStretch(1)
         row.addWidget(self.website_button)
         row.addWidget(self.tutorial_button)
         row.addWidget(version_label)
 
-        footer_layout.addLayout(row)
         outer.addWidget(self.footer_bar)
 
     def _build_theme_icon(self, mode: str) -> QIcon:
         if not hasattr(self, "theme_toggle_button"):
             return QIcon()
-        size = max(14, int(self.theme_toggle_button.iconSize().width()))
-        screen = QGuiApplication.primaryScreen()
-        dpr = float(screen.devicePixelRatio()) if screen is not None else 1.0
-        px = int(round(size * dpr))
-        icon = QPixmap(px, px)
-        icon.setDevicePixelRatio(dpr)
-        icon.fill(Qt.transparent)
-        icon_color = QColor(self.theme.text_primary)
-        painter = QPainter(icon)
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        painter.setPen(QPen(icon_color, max(1.1, size * 0.10), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        painter.setBrush(Qt.NoBrush)
-        center = QPointF(size * 0.5, size * 0.5)
-
-        if mode == "sun":
-            orbit_radius = size * 0.22
-            inner_ray = size * 0.34
-            outer_ray = size * 0.46
-            painter.drawEllipse(
-                QPointF(center.x(), center.y()),
-                orbit_radius,
-                orbit_radius,
-            )
-            for direction in (
-                QPointF(1.0, 0.0),
-                QPointF(-1.0, 0.0),
-                QPointF(0.0, 1.0),
-                QPointF(0.0, -1.0),
-                QPointF(0.707, 0.707),
-                QPointF(-0.707, -0.707),
-                QPointF(0.707, -0.707),
-                QPointF(-0.707, 0.707),
-            ):
-                start = QPointF(center.x() + (direction.x() * inner_ray), center.y() + (direction.y() * inner_ray))
-                end = QPointF(center.x() + (direction.x() * outer_ray), center.y() + (direction.y() * outer_ray))
-                painter.drawLine(start, end)
-        else:
-            moon_radius = size * 0.38
-            painter.setBrush(icon_color)
-            painter.drawEllipse(center, moon_radius, moon_radius)
-            painter.setCompositionMode(QPainter.CompositionMode_Clear)
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(Qt.transparent)
-            painter.drawEllipse(
-                QPointF(center.x() + (size * 0.17), center.y() - (size * 0.10)),
-                size * 0.34,
-                size * 0.34,
-            )
-            painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
-
-        painter.end()
-        return QIcon(icon)
+        size = int(self.theme_toggle_button.iconSize().width())
+        return build_theme_icon(mode=mode, size=size, color=self.theme.text_primary)
 
     def _on_theme_toggle_clicked(self) -> None:
         next_mode = "light" if self._theme_mode == "dark" else "dark"
@@ -1246,52 +831,48 @@ class MainWindow(QMainWindow):
             widget.unsetCursor()
 
     def _install_wheel_guards(self) -> None:
-        self.installEventFilter(self)
-        for widget in self.findChildren(QWidget):
-            widget.installEventFilter(self)
+        if not self._global_event_filter_installed:
+            app = QApplication.instance()
+            if app is not None:
+                app.installEventFilter(self)
+                self._global_event_filter_installed = True
+        wheel_targets: list[QWidget] = []
+        wheel_target_ids: set[int] = set()
         for combo in self.findChildren(QComboBox):
             view = combo.view()
             if view is not None:
-                view.installEventFilter(self)
+                wheel_targets.append(view)
+                wheel_target_ids.add(id(view))
                 viewport = view.viewport()
                 if viewport is not None:
-                    viewport.installEventFilter(self)
-
-    @staticmethod
-    def _is_descendant_of(child: object, ancestor: object) -> bool:
-        current = child
-        while current is not None:
-            if current is ancestor:
-                return True
-            if not hasattr(current, "parent"):
-                return False
-            current = current.parent()                          
-        return False
+                    wheel_targets.append(viewport)
+                    wheel_target_ids.add(id(viewport))
+        self._wheel_allowed_widgets = tuple(wheel_targets)
+        self._wheel_allowed_widget_ids = wheel_target_ids
 
     def _wheel_allowed(self, watched: object) -> bool:
-        for combo in self.findChildren(QComboBox):
-            view = combo.view()
-            if view is None:
-                continue
-            if self._is_descendant_of(watched, view):
+        if id(watched) in self._wheel_allowed_widget_ids:
+            return True
+        for target in self._wheel_allowed_widgets:
+            if is_descendant_of(watched, target):
                 return True
         return False
 
     def _is_settings_descendant(self, watched: object) -> bool:
-        return self._is_descendant_of(watched, self.settings_scroll)
+        return is_descendant_of(watched, self.settings_scroll)
 
     def _is_tutorial_descendant(self, watched: object) -> bool:
         overlay = getattr(self, "_tutorial_overlay", None)
         if overlay is None:
             return False
-        return self._is_descendant_of(watched, overlay)
+        return is_descendant_of(watched, overlay)
 
     def is_keybind_edit_allowed_target(self, watched: object) -> bool:
-        if self._is_descendant_of(watched, self.piano_widget):
+        if is_descendant_of(watched, self.piano_widget):
             return True
-        if self._is_descendant_of(watched, self.keybind_row_widget):
+        if is_descendant_of(watched, self.keybind_row_widget):
             return True
-        return self._is_descendant_of(watched, self.keybind_hint_label)
+        return is_descendant_of(watched, self.keybind_hint_label)
 
     @staticmethod
     def event_widget_at_pointer(watched: object, event: QEvent) -> object:
@@ -1324,13 +905,18 @@ class MainWindow(QMainWindow):
         bar.setValue(bar.value() - amount)
 
     def eventFilter(self, watched, event):                          
-        if event.type() in {
+        event_type = event.type()
+        in_window_scope = watched is self or is_descendant_of(watched, self)
+        wheel_popup_target = event_type == QEvent.Wheel and self._wheel_allowed(watched)
+        if not in_window_scope and not wheel_popup_target:
+            return super().eventFilter(watched, event)
+
+        if event_type in {
             QEvent.EnabledChange,
             QEvent.Show,
             QEvent.Hide,
             QEvent.Enter,
             QEvent.HoverEnter,
-            QEvent.HoverMove,
             QEvent.StyleChange,
             QEvent.Polish,
         }:
@@ -1338,7 +924,7 @@ class MainWindow(QMainWindow):
                 self._set_widget_cursor(watched)
 
         if self._tutorial_mode and not self._is_tutorial_descendant(watched):
-            if event.type() in {
+            if event_type in {
                 QEvent.MouseButtonPress,
                 QEvent.MouseButtonRelease,
                 QEvent.MouseButtonDblClick,
@@ -1361,19 +947,19 @@ class MainWindow(QMainWindow):
                 QEvent.MouseMove,
                 QEvent.ContextMenu,
             }
-            if event.type() == QEvent.Wheel:
+            if event_type == QEvent.Wheel:
                 self.keybindEditActionBlocked.emit()
                 event.accept()
                 return True
             target = self.event_widget_at_pointer(watched, event)
-            if event.type() in blocked_mouse_events and not self.is_keybind_edit_allowed_target(target):
-                if event.type() in {QEvent.MouseButtonPress, QEvent.ContextMenu}:
+            if event_type in blocked_mouse_events and not self.is_keybind_edit_allowed_target(target):
+                if event_type in {QEvent.MouseButtonPress, QEvent.ContextMenu}:
                     self.keybindEditActionBlocked.emit()
                 event.accept()
                 return True
 
-        if event.type() == QEvent.Wheel:
-            if self._wheel_allowed(watched):
+        if event_type == QEvent.Wheel:
+            if wheel_popup_target:
                 return super().eventFilter(watched, event)
             if self._is_settings_descendant(watched):
                 self._scroll_area_by_wheel(self.settings_scroll, event.angleDelta().y())
@@ -1418,7 +1004,7 @@ class MainWindow(QMainWindow):
         stats_value_font = self._sp(12)
         card_title_font = self._sp(12)
         button_font = self._sp(10)
-        footer_font = self._sp(10)
+        footer_font = max(8, int(round(10.2 * self._ui_scale)))
         combo_height = self._sp(24)
         slider_min_h = max(16, self._sp(24))
         self.settings_scroll.setFixedHeight(self._sp(236))
@@ -1432,8 +1018,7 @@ class MainWindow(QMainWindow):
         glow_color.setAlpha(210)
         self._recording_indicator_effect.setColor(glow_color)
         self._refresh_scaled_layout_metrics()
-        self.setStyleSheet(
-            f"""
+        style_sheet = f"""
             QMainWindow {{
                 background-color: {self.theme.app_bg};
             }}
@@ -1635,21 +1220,35 @@ class MainWindow(QMainWindow):
                 background: transparent;
                 color: {self.theme.accent};
                 border: none;
-                padding: 2px 2px;
+                padding-top: 1px;
+                padding-right: 2px;
+                padding-bottom: 0px;
+                padding-left: 2px;
                 font: 700 {footer_font}pt "Segoe UI";
                 text-align: left;
             }}
             #footerLink:hover {{
                 color: {self.theme.text_primary};
+                background: transparent;
             }}
             #footerVersion {{
                 color: {self.theme.text_secondary};
                 font: 700 {footer_font}pt "Segoe UI";
+                padding-top: 0px;
             }}
             #footerIcon {{
                 background: transparent;
+                color: {self.theme.text_primary};
                 border: none;
-                margin-right: {self._sp(6)}px;
+                min-width: {self._sp(18)}px;
+                min-height: {self._sp(18)}px;
+                max-width: {self._sp(18)}px;
+                max-height: {self._sp(18)}px;
+                padding: 0;
+                margin: 0;
+            }}
+            #footerIcon:hover {{
+                background: transparent;
             }}
             #recordingIndicator {{
                 background: {self.theme.accent};
@@ -1657,7 +1256,9 @@ class MainWindow(QMainWindow):
                 border-radius: {dot_radius}px;
             }}
             """
-        )
+        if style_sheet != self._last_stylesheet:
+            self._last_stylesheet = style_sheet
+            self.setStyleSheet(style_sheet)
         self._refresh_key_color_buttons()
         self._refresh_slider_style_colors()
         self._refresh_checkbox_style_colors()
@@ -1680,10 +1281,17 @@ class MainWindow(QMainWindow):
         if keybind_overlay is not None:
             keybind_overlay.set_theme(self.theme)
 
+    def _schedule_layout_refresh(self) -> None:
+        if self._layout_refresh_timer.isActive():
+            return
+        self._layout_refresh_timer.start()
+
     def refresh_fixed_size(self) -> None:
         self.centralWidget().layout().activate()
         self.adjustSize()
-        self.setFixedSize(self.sizeHint())
+        target_size = self.sizeHint()
+        if self.size() != target_size:
+            self.setFixedSize(target_size)
         self._position_recording_indicator()
         QTimer.singleShot(0, self._sync_all_notes_off_width)
         self._sync_tutorial_overlay()
@@ -1817,34 +1425,7 @@ class MainWindow(QMainWindow):
             self.resetDefaultsRequested.emit()
 
     def _message_box_stylesheet(self) -> str:
-        return f"""
-            QDialog, QMessageBox {{
-                background: {self.theme.panel_bg};
-                color: {self.theme.text_primary};
-            }}
-            QLabel {{
-                color: {self.theme.text_primary};
-                background: transparent;
-            }}
-            QPushButton {{
-                background: {self.theme.panel_bg};
-                color: {self.theme.text_primary};
-                border: 1px solid {self.theme.border};
-                border-radius: 6px;
-                padding: 5px 10px;
-                font: 600 9.5pt "Segoe UI";
-                min-height: 24px;
-            }}
-            QPushButton:hover {{
-                background: {self.theme.accent};
-                color: {self.theme.text_primary};
-            }}
-            QPushButton:disabled {{
-                background: {self.theme.panel_bg};
-                color: {self.theme.text_secondary};
-                border-color: {self.theme.border};
-            }}
-        """
+        return message_box_stylesheet_util(self.theme)
 
     def _show_themed_message(
         self,
@@ -1868,30 +1449,23 @@ class MainWindow(QMainWindow):
         if not window_icon.isNull():
             dialog.setWindowIcon(window_icon)
         dialog.setStyleSheet(self._message_box_stylesheet())
-        self._apply_dialog_button_cursors(dialog)
+        apply_dialog_button_cursors_util(dialog)
         self._apply_windows_title_bar_theme(dialog)
         result = QMessageBox.StandardButton(dialog.exec())
         self._restore_cursor_state_after_modal()
         return result
 
-    @staticmethod
-    def _apply_dialog_button_cursors(dialog: QMessageBox) -> None:
-        for button in dialog.buttons():
-            button.setCursor(Qt.PointingHandCursor)
+    def _reset_cursor_state_after_modal(self) -> None:
+        clear_override_cursors_util()
+        self.setCursor(Qt.ArrowCursor)
+        self.unsetCursor()
+        self._set_interaction_cursors()
 
     def _restore_cursor_state_after_modal_deferred(self) -> None:
-        while QApplication.overrideCursor() is not None:
-            QApplication.restoreOverrideCursor()
-        self.setCursor(Qt.ArrowCursor)
-        self.unsetCursor()
-        self._set_interaction_cursors()
+        self._reset_cursor_state_after_modal()
 
     def _restore_cursor_state_after_modal(self) -> None:
-        while QApplication.overrideCursor() is not None:
-            QApplication.restoreOverrideCursor()
-        self.setCursor(Qt.ArrowCursor)
-        self.unsetCursor()
-        self._set_interaction_cursors()
+        self._reset_cursor_state_after_modal()
         QTimer.singleShot(0, self._restore_cursor_state_after_modal_deferred)
 
     def show_info(self, title: str, text: str) -> None:
@@ -1953,26 +1527,43 @@ class MainWindow(QMainWindow):
         target = self.mode_88_btn if mode == "88" else self.mode_61_btn
         target.setChecked(True)
 
-    def set_instruments(self, instruments: list[InstrumentInfo], selected_id: str) -> None:
-        self.instrument_combo.blockSignals(True)
-        self.instrument_combo.clear()
-        for item in instruments:
-            label = f"{item.name} [{item.source}]"
-            self.instrument_combo.addItem(label, userData=item.id)
+    def _populate_combo(
+        self,
+        combo: QComboBox,
+        options: list[tuple[str, object]],
+        *,
+        selected: object,
+        default_index: int = -1,
+        keep_enabled_when_empty: bool = False,
+    ) -> int:
+        combo.blockSignals(True)
+        combo.clear()
+        for label, user_data in options:
+            combo.addItem(label, userData=user_data)
 
         target_index = -1
-        if selected_id:
-            for idx in range(self.instrument_combo.count()):
-                if self.instrument_combo.itemData(idx, role=Qt.UserRole) == selected_id:
-                    target_index = idx
-                    break
-        if target_index < 0 and self.instrument_combo.count() > 0:
-            target_index = 0
-        if target_index >= 0:
-            self.instrument_combo.setCurrentIndex(target_index)
+        for idx in range(combo.count()):
+            if combo.itemData(idx, role=Qt.UserRole) == selected:
+                target_index = idx
+                break
 
-        self.instrument_combo.blockSignals(False)
-        self.instrument_combo.setEnabled(self.instrument_combo.count() > 0)
+        if target_index < 0 and default_index >= 0 and combo.count() > default_index:
+            target_index = default_index
+        if target_index >= 0:
+            combo.setCurrentIndex(target_index)
+
+        combo.blockSignals(False)
+        combo.setEnabled(keep_enabled_when_empty or combo.count() > 0)
+        return target_index
+
+    def set_instruments(self, instruments: list[InstrumentInfo], selected_id: str) -> None:
+        options = [(f"{item.name} [{item.source}]", item.id) for item in instruments]
+        self._populate_combo(
+            self.instrument_combo,
+            options,
+            selected=str(selected_id or ""),
+            default_index=0,
+        )
 
     def set_bank_preset_options(
         self,
@@ -1981,57 +1572,35 @@ class MainWindow(QMainWindow):
         selected_bank: int,
         selected_preset: int,
     ) -> None:
-        self.bank_combo.blockSignals(True)
-        self.bank_combo.clear()
-        for bank in banks:
-            self.bank_combo.addItem(str(bank), userData=int(bank))
-        bank_index = -1
-        for idx in range(self.bank_combo.count()):
-            if self.bank_combo.itemData(idx, role=Qt.UserRole) == selected_bank:
-                bank_index = idx
-                break
-        if bank_index < 0 and self.bank_combo.count() > 0:
-            bank_index = 0
-        if bank_index >= 0:
-            self.bank_combo.setCurrentIndex(bank_index)
-        self.bank_combo.blockSignals(False)
-        self.bank_combo.setEnabled(self.bank_combo.count() > 0)
+        bank_options = [(str(bank), int(bank)) for bank in banks]
+        self._populate_combo(
+            self.bank_combo,
+            bank_options,
+            selected=int(selected_bank),
+            default_index=0,
+        )
 
-        self.preset_combo.blockSignals(True)
-        self.preset_combo.clear()
-        for preset in presets:
-            self.preset_combo.addItem(str(preset), userData=int(preset))
-        preset_index = -1
-        for idx in range(self.preset_combo.count()):
-            if self.preset_combo.itemData(idx, role=Qt.UserRole) == selected_preset:
-                preset_index = idx
-                break
-        if preset_index < 0 and self.preset_combo.count() > 0:
-            preset_index = 0
-        if preset_index >= 0:
-            self.preset_combo.setCurrentIndex(preset_index)
-        self.preset_combo.blockSignals(False)
-        self.preset_combo.setEnabled(self.preset_combo.count() > 0)
+        preset_options = [(str(preset), int(preset)) for preset in presets]
+        self._populate_combo(
+            self.preset_combo,
+            preset_options,
+            selected=int(selected_preset),
+            default_index=0,
+        )
 
     def set_midi_input_devices(self, items: list[str], selected: str) -> None:
-        self.midi_input_combo.blockSignals(True)
-        self.midi_input_combo.clear()
-        self.midi_input_combo.addItem("None", userData="")
+        options: list[tuple[str, object]] = [("None", "")]
         for name in items:
             label = str(name).strip()
-            if not label:
-                continue
-            self.midi_input_combo.addItem(label, userData=label)
-
-        target = str(selected).strip()
-        target_index = 0
-        for idx in range(self.midi_input_combo.count()):
-            if self.midi_input_combo.itemData(idx, role=Qt.UserRole) == target:
-                target_index = idx
-                break
-        self.midi_input_combo.setCurrentIndex(target_index)
-        self.midi_input_combo.blockSignals(False)
-        self.midi_input_combo.setEnabled(True)
+            if label:
+                options.append((label, label))
+        self._populate_combo(
+            self.midi_input_combo,
+            options,
+            selected=str(selected).strip(),
+            default_index=0,
+            keep_enabled_when_empty=True,
+        )
 
     def set_recording_state(self, active: bool, has_take: bool) -> None:
         is_active = bool(active)
@@ -2049,33 +1618,28 @@ class MainWindow(QMainWindow):
         minutes, secs = divmod(total, 60)
         self.recording_timer_label.setText(f"{minutes:02d}:{secs:02d}")
 
+    @staticmethod
+    def _set_slider_and_label(slider: QSlider, label: QLabel, value: int, text: str) -> None:
+        slider.blockSignals(True)
+        slider.setValue(int(value))
+        slider.blockSignals(False)
+        label.setText(text)
+
     def set_volume(self, volume: float) -> None:
         value = int(round(max(0.0, min(1.0, volume)) * 100))
-        self.volume_slider.blockSignals(True)
-        self.volume_slider.setValue(value)
-        self.volume_slider.blockSignals(False)
-        self.volume_value.setText(f"{value}%")
+        self._set_slider_and_label(self.volume_slider, self.volume_value, value, f"{value}%")
 
     def set_velocity(self, value: int) -> None:
         clamped = max(1, min(127, int(value)))
-        self.velocity_slider.blockSignals(True)
-        self.velocity_slider.setValue(clamped)
-        self.velocity_slider.blockSignals(False)
-        self.velocity_value.setText(str(clamped))
+        self._set_slider_and_label(self.velocity_slider, self.velocity_value, clamped, str(clamped))
 
     def set_transpose(self, value: int) -> None:
         clamped = max(-21, min(21, int(value)))
-        self.transpose_slider.blockSignals(True)
-        self.transpose_slider.setValue(clamped)
-        self.transpose_slider.blockSignals(False)
-        self.transpose_value.setText(f"{clamped:+d}")
+        self._set_slider_and_label(self.transpose_slider, self.transpose_value, clamped, f"{clamped:+d}")
 
     def set_sustain_percent(self, value: int) -> None:
         clamped = max(0, min(100, int(value)))
-        self.sustain_slider.blockSignals(True)
-        self.sustain_slider.setValue(clamped)
-        self.sustain_slider.blockSignals(False)
-        self.sustain_value.setText(f"{clamped}%")
+        self._set_slider_and_label(self.sustain_slider, self.sustain_value, clamped, f"{clamped}%")
 
     def set_hold_space_sustain_mode(self, enabled: bool) -> None:
         self.hold_space_sustain_checkbox.blockSignals(True)
@@ -2130,7 +1694,7 @@ class MainWindow(QMainWindow):
         self._apply_windows_title_bar_theme()
 
     def set_ui_scale(self, scale: float) -> None:
-        clamped = max(0.50, min(2.00, float(scale)))
+        clamped = max(UI_SCALE_MIN, min(UI_SCALE_MAX, float(scale)))
         self._ui_scale = clamped
         self._applied_ui_scale = clamped
         slider_value = int(round((clamped - UI_SCALE_MIN) / UI_SCALE_STEP))
@@ -2139,7 +1703,7 @@ class MainWindow(QMainWindow):
         self.ui_scale_slider.blockSignals(False)
         self.ui_scale_value.setText(f"{int(round(clamped * 100.0))}%")
         self._apply_style()
-        self.refresh_fixed_size()
+        self._schedule_layout_refresh()
 
     def set_animation_speed(self, speed: str) -> None:
         target = speed if speed in ANIMATION_SPEED_LABELS else "instant"
@@ -2202,7 +1766,7 @@ class MainWindow(QMainWindow):
         self.settings_toggle_button.setText("Hide Settings" if self._settings_visible else "Show Settings")
         self._update_panel_divider_visibility()
         self._sync_keybind_overlay()
-        self.refresh_fixed_size()
+        self._schedule_layout_refresh()
 
     def set_controls_visible(self, visible: bool) -> None:
         self._controls_visible = bool(visible)
@@ -2210,13 +1774,13 @@ class MainWindow(QMainWindow):
         self.controls_toggle_button.setText("Hide Controls" if self._controls_visible else "Show Controls")
         self._update_panel_divider_visibility()
         self._sync_keybind_overlay()
-        self.refresh_fixed_size()
+        self._schedule_layout_refresh()
 
     def set_stats_visible(self, visible: bool) -> None:
         self._stats_visible = bool(visible)
         self.stats_bar.setVisible(self._stats_visible)
         self.stats_toggle_button.setText("Hide Stats" if self._stats_visible else "Show Stats")
-        self.refresh_fixed_size()
+        self._schedule_layout_refresh()
 
     def set_stats_values(self, values: dict[str, str], sustain_active: bool) -> None:
         self.stats_bar.set_values(values, sustain_active=sustain_active)
@@ -2245,13 +1809,13 @@ class MainWindow(QMainWindow):
         }
 
     def ensure_settings_target_visible(self, target: QWidget) -> None:
-        if not self._is_descendant_of(target, self.settings_scroll):
+        if not is_descendant_of(target, self.settings_scroll):
             return
         self.settings_scroll.ensureWidgetVisible(target, 0, self._sp(18))
         self._sync_tutorial_overlay()
 
     def ensure_controls_target_visible(self, target: QWidget) -> None:
-        if not self._is_descendant_of(target, self.controls_scroll):
+        if not is_descendant_of(target, self.controls_scroll):
             return
         self._sync_tutorial_overlay()
 
@@ -2336,3 +1900,4 @@ class MainWindow(QMainWindow):
             hint_rect = QRect(hint_top_left, hint_widget.size())
             targets.append(row_rect.united(hint_rect))
         overlay.set_target_rects(targets)
+

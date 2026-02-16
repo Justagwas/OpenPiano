@@ -57,9 +57,6 @@ class MidiInputManager:
             )
         return f"{type(exc).__name__}: {exc}"
 
-    def is_available(self) -> bool:
-        return self._mido_module is not None
-
     def backend_error(self) -> str:
         return self._backend_error
 

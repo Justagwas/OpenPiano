@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -15,16 +14,16 @@ from openpiano.core.config import (
     INSTRUMENT_PRESET_MAX,
     INSTRUMENT_PRESET_MIN,
 )
+from openpiano.core.normalize import clamp_int
+from openpiano.core.runtime_paths import app_local_data_dir, project_root, resource_root
 
-InstrumentSource = Literal["builtin", "portable", "localappdata"]
+InstrumentSource = Literal["builtin", "localappdata"]
 
 SOUNDFONTS_DIR_NAME = "soundfonts"
-LEGACY_FONTS_DIR_NAME = "fonts"
 SOUNDFONT_EXTENSIONS = (".sf2", ".sf3")
 SOURCE_ORDER: dict[InstrumentSource, int] = {
     "builtin": 0,
-    "portable": 1,
-    "localappdata": 2,
+    "localappdata": 1,
 }
 
 
@@ -39,40 +38,14 @@ class InstrumentInfo:
     default_preset: int = 0
 
 
-def project_root() -> Path:
-    return Path(__file__).resolve().parents[2]
-
-
-def resource_root() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))                              
-    return project_root()
-
-
-def _preferred_or_legacy_dir(base: Path) -> Path:
-    preferred = base / SOUNDFONTS_DIR_NAME
-    legacy = base / LEGACY_FONTS_DIR_NAME
-    if preferred.exists() and preferred.is_dir():
-        return preferred
-    return legacy
-
-
 def builtin_fonts_dir() -> Path:
-    return _preferred_or_legacy_dir(resource_root())
-
-
-def portable_fonts_dir() -> Path:
-    if getattr(sys, "frozen", False):
-        base = Path(sys.executable).resolve().parent
-    else:
-        base = project_root()
-    return _preferred_or_legacy_dir(base)
+    return resource_root() / SOUNDFONTS_DIR_NAME
 
 
 def localappdata_fonts_dir() -> Path:
-    local_app_data = os.environ.get("LOCALAPPDATA")
-    if local_app_data:
-        return Path(local_app_data) / APP_NAME / "soundfonts"
+    local_data_dir = app_local_data_dir(APP_NAME)
+    if local_data_dir is not None:
+        return local_data_dir / "soundfonts"
     return project_root() / "user_soundfonts"
 
 
@@ -85,21 +58,8 @@ def ensure_user_fonts_dir() -> Path:
     return target
 
 
-def _same_path(left: Path, right: Path) -> bool:
-    try:
-        left_resolved = left.resolve()
-        right_resolved = right.resolve()
-    except Exception:
-        return os.path.normcase(str(left)) == os.path.normcase(str(right))
-    return os.path.normcase(str(left_resolved)) == os.path.normcase(str(right_resolved))
-
-
 def _clamp_int(value: Any, minimum: int, maximum: int, default: int) -> int:
-    try:
-        parsed = int(value)
-    except Exception:
-        parsed = default
-    return max(minimum, min(maximum, parsed))
+    return clamp_int(value, minimum, maximum, default=default)
 
 
 def _safe_label(text: str) -> str:
@@ -145,14 +105,10 @@ def _build_id(source: InstrumentSource, root: Path, soundfont_path: Path) -> str
 
 
 def _source_roots() -> list[tuple[InstrumentSource, Path]]:
-    builtin = builtin_fonts_dir()
-    portable = portable_fonts_dir()
-    local = localappdata_fonts_dir()
-    roots: list[tuple[InstrumentSource, Path]] = [("builtin", builtin)]
-    if portable.exists() and portable.is_dir() and not _same_path(portable, builtin) and not _same_path(portable, local):
-        roots.append(("portable", portable))
-    roots.append(("localappdata", local))
-    return roots
+    return [
+        ("builtin", builtin_fonts_dir()),
+        ("localappdata", localappdata_fonts_dir()),
+    ]
 
 
 def _is_default_builtin(item: InstrumentInfo) -> bool:

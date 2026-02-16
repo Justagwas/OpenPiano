@@ -1,170 +1,155 @@
+﻿# OpenPiano
+
+<div align="center">
+
+[![Code: GitHub](https://img.shields.io/badge/Code-GitHub-111827.svg?style=flat&logo=github&logoColor=white)](https://github.com/Justagwas/openpiano)
+[![Website](https://img.shields.io/badge/Website-OpenPiano-0ea5e9.svg?style=flat&logo=google-chrome&logoColor=white)](https://Justagwas.com/projects/openpiano)
+[![Mirror: SourceForge](https://img.shields.io/badge/Mirror-SourceForge-ff6600.svg?style=flat&logo=sourceforge&logoColor=white)](https://sourceforge.net/projects/openpiano/)
+
+</div>
+
 <p align="center">
   <img
-    width="192"
-    height="192"
+    width="128"
+    height="128"
     alt="OpenPiano Logo"
     src="https://github.com/user-attachments/assets/dc0be90d-30fe-40c0-9dd1-a0415daa777f"
   />
 </p>
 
-<h1 align="center">OpenPiano</h1>
+<div align="center">
 
-<h3 align="center">Play piano with your keyboard, mouse, or MIDI device</h3>
+[![Download (Windows)](https://img.shields.io/badge/Download-Windows%20(OpenPianoSetup.exe)-2563eb.svg?style=flat&logo=windows&logoColor=white)](https://github.com/Justagwas/OpenPiano/releases/latest/download/OpenPianoSetup.exe)
 
-<p align="center">
-  A local-first desktop piano for practice, composition, and sound design<br/>
-  with SoundFonts, real-time controls, and MIDI recording/export.
-</p>
+</div>
 
-<p align="center">
-  <a href="https://github.com/Justagwas/OpenPiano/releases/latest/download/OpenPianoSetup.exe">
-    <img
-      src="https://img.shields.io/badge/Download%20for%20Windows-2563eb?style=for-the-badge&logo=windows&logoColor=white"
-      alt="Download OpenPiano for Windows"
-    />
-  </a>
-</p>
+<p align="center"><b>A lightweight desktop piano you can play instantly with keyboard, mouse, or MIDI</b></p>
 
-<p align="center">
-  <a href="https://Justagwas.com/projects/openpiano">Website</a>
-  &nbsp;&bull;&nbsp;
-  <a href="https://github.com/Justagwas/OpenPiano/releases">Releases</a>
-  &nbsp;&bull;&nbsp;
-  <a href="https://github.com/Justagwas/OpenPiano/issues">Issues</a>
-  &nbsp;&bull;&nbsp;
-  <a href="https://github.com/Justagwas/OpenPiano/wiki">Documentation</a>
-  &nbsp;&bull;&nbsp;
-  <a href="https://github.com/Justagwas/OpenPiano/blob/main/LICENSE">License</a>
-</p>
+<p align="center">OpenPiano is a Windows desktop piano instrument for practice, composition and sound design with SoundFonts, real-time controls, and MIDI recording/export</p>
 
----
+<div align="center">
+
+[![Version](https://img.shields.io/github/v/tag/Justagwas/OpenPiano.svg?label=Version)](
+https://github.com/Justagwas/OpenPiano/tags)
+[![Last Commit](https://img.shields.io/github/last-commit/Justagwas/OpenPiano/main.svg?style=flat&cacheSeconds=3600)](
+https://github.com/Justagwas/OpenPiano/commits/main)
+[![Stars](https://img.shields.io/github/stars/Justagwas/OpenPiano.svg?style=flat&cacheSeconds=3600)](
+https://github.com/Justagwas/OpenPiano/stargazers)
+[![Open Issues](https://img.shields.io/github/issues/Justagwas/OpenPiano.svg)](
+https://github.com/Justagwas/OpenPiano/issues)
+[![License](https://img.shields.io/github/license/Justagwas/OpenPiano.svg)](
+https://github.com/Justagwas/OpenPiano/blob/main/LICENSE)
+
+</div>
 
 ## Overview
 
-OpenPiano is a Windows desktop piano app that lets you play and practice using your PC keyboard, mouse, or a MIDI controller.
+OpenPiano is a Windows desktop piano application that lets you play using your computer keyboard, mouse, or a connected MIDI device. It supports 61- and 88-key layouts, customizable keybindings, SoundFont routing, and MIDI recording/export.  
 
-It is built to be lightweight and non-dependent on cloud accounts or online dependencies.
+OpenPiano's performance:  
+  ~0% CPU usage while idle.  
+  ~1% CPU usage during active use.  
+  ~90 MB memory footprint.  
 
 ## Basic usage
 
-1. Download and install OpenPiano from the [latest Windows release](https://github.com/Justagwas/OpenPiano/releases/latest/download/OpenPianoSetup.exe).
-2. Launch the app and play.  
-Optionally:
-1. Check out the `Tutorial`.
-2. Pick a keyboard layout (`61-key` or `88-key`).  
-3. Play with either form: keyboard, mouse, or MIDI device.  
-4. Change the SoundFont/instrument. 
-5. Record a take and export it as `.mid`.  
+1. Download and install from the [latest release](https://github.com/Justagwas/OpenPiano/releases/latest/download/OpenPianoSetup.exe).  
+2. Launch OpenPiano.  
+3. Play with keyboard, mouse, or MIDI controller.  
+4. Choose your play mode (`61 Keys` or `88 Keys`).  
+5. Pick an instrument/program and optional MIDI input device.  
+6. Record and export a `.mid` take when needed.  
 
 ## Features
 
-- 61-key and 88-key layouts with live key feedback
-- QWERTY keyboard play with key-label support
-- Mouse play and drag interaction
-- MIDI input device support
-- SoundFont support (`.sf2`, `.sf3`) with bank/preset selection
-- Real-time controls for volume, velocity, sustain, and transpose
-- MIDI recording and `.mid` export
-- Stats display (KPS, held keys, polyphony, transpose, sustain)
-- Theme, UI scale, animation speed, and key color customization
+- Keyboard, mouse, and MIDI input in one app session.
+- 61-key and 88-key layouts with live visual key feedback.
+- SoundFont instrument routing (`.sf2` / `.sf3`) with bank/preset selection.
+- Custom keybind edit mode with Save, Discard, and undo (`Ctrl+Z`).
+- Real-time controls for volume, velocity, sustain, transpose, animation speed, UI scale and more.
+- Theme toggle and per-key color customization.
+- Built-in tutorial.
+- MIDI recording and `.mid` export.
+- Runs entirely locally (no account or internet dependency required).
 
-## Input Methods
+## Feature sections
 
-OpenPiano supports three input paths in the same session:
+### Input Modes
 
-- `Keyboard`: play directly with your keyboard when no external controller is connected.
-- `Mouse`: click and drag on keys for quick testing and note checks.
-- `MIDI`: connect a MIDI keyboard/device and select it in the input dropdown.
+OpenPiano supports:
 
-## SoundFonts and Instruments
+- keyboard play via the mapped piano layout.
+- Mouse click/drag play directly on piano keys.
+- External MIDI input device routing from the controls panel.
 
-Use SoundFonts to change tone instantly while keeping the same play workflow.
+### SoundFonts and Instruments
 
-- Supports `.sf2` and `.sf3` instruments
-- Bank and preset selection for compatible SoundFonts
+OpenPiano discovers and loads SoundFonts for playback through FluidSynth. You can switch instrument, bank, and preset live from the Controls panel.
 
-## Recording and MIDI Export
+### Keybind Editing and UI Controls
 
-Record takes directly in the app and export standard MIDI files.
+The app includes a focused keybind editor (Save/Discard flow), UI scaling, theme switching, animation speed controls, and key color controls.
 
-- Capture live play from keyboard, mouse, or MIDI input
-- Export to `.mid` for DAW editing, arrangement, or archive
+### Recording and Export
 
-## Configuration
-
-OpenPiano persists app settings in [`OpenPiano_config.json`](https://github.com/Justagwas/OpenPiano/blob/main/OpenPiano/OpenPiano_config.json).
-
-Save location behavior:
-
-- Portable/writable mode: next to the app executable (or next to `OpenPiano.py` in source runs)
-- Fallback mode: `%LOCALAPPDATA%\OpenPiano\OpenPiano_config.json`
-
-## Supported Formats
-
-- SoundFonts: `.sf2`, `.sf3`
-- MIDI export: `.mid`
+OpenPiano can capture note events during a live take and export a standard `.mid` file.
 
 ## Preview
 
-- Project page with full preview gallery: [justagwas.com/projects/openpiano](https://www.justagwas.com/projects/openpiano)
-- OpenPiano Installer Download link: [justagwas.com/projects/openpiano/download](https://www.justagwas.com/projects/openpiano/download)
+- Website project page (overview + gallery): <https://www.justagwas.com/projects/openpiano>
+- Download page: <https://www.justagwas.com/projects/openpiano/download>
+- Releases: <https://github.com/Justagwas/OpenPiano/releases>
 
 <details>
 <summary>For Developers</summary>
 
 ### Requirements
 
-- Python 3.11+
-
-Main dependencies are managed in [`OpenPiano/requirements.txt`](https://github.com/Justagwas/OpenPiano/blob/main/OpenPiano/requirements.txt) (`PySide6`, `pyfluidsynth`, `mido`, `python-rtmidi`).
+- Windows (primary target runtime).
+- Python 3.11+.
+- Dependencies in [`OpenPiano/requirements.txt`](https://github.com/Justagwas/OpenPiano/blob/main/OpenPiano/requirements.txt).
 
 ### Running From Source
 
 ```powershell
 cd OpenPiano
-py -m pip install -r requirements.txt
+py -m pip install -r OpenPiano/requirements.txt
 py OpenPiano.py
 ```
 
-If your environment has resolver issues, install core packages directly:
+### Configuration Files
 
-```powershell
-py -m pip install PySide6 pyfluidsynth mido python-rtmidi
-```
-
-### Build (optional)
-
-```powershell
-cd OpenPiano
-py -m PyInstaller -F -w --name OpenPiano --icon icon.ico --clean --add-data "icon.ico;." --add-binary "third_party\fluidsynth\bin\*;third_party\fluidsynth\bin" --hidden-import fluidsynth --hidden-import mido --hidden-import mido.backends.rtmidi --hidden-import rtmidi --exclude-module numpy OpenPiano.py
-```
-
-Build artifacts are produced in `OpenPiano/dist/`.
-
-### Configuration Files (developer-relevant)
-
-- Runtime settings: [`OpenPiano_config.json`](https://github.com/Justagwas/OpenPiano/blob/main/OpenPiano/OpenPiano_config.json)
-- App constants and URLs: [`OpenPiano/openpiano/core/config.py`](https://github.com/Justagwas/OpenPiano/blob/main/OpenPiano/openpiano/core/config.py)
-- Build/runtime assets: [`OpenPiano/icon.ico`](https://github.com/Justagwas/OpenPiano/blob/main/OpenPiano/icon.ico), [`OpenPiano/third_party/fluidsynth/bin/`](https://github.com/Justagwas/OpenPiano/tree/main/OpenPiano/third_party/fluidsynth/bin)
+- App constants and release endpoints: [`OpenPiano/openpiano/core/config.py`](https://github.com/Justagwas/OpenPiano/blob/main/OpenPiano/openpiano/core/config.py)
+- Runtime settings serialization logic: [`OpenPiano/openpiano/core/settings_store.py`](https://github.com/Justagwas/OpenPiano/blob/main/OpenPiano/openpiano/core/settings_store.py)
+- Theme palette definitions: [`OpenPiano/openpiano/core/theme.py`](https://github.com/Justagwas/OpenPiano/blob/main/OpenPiano/openpiano/core/theme.py)
+- Tutorial step content: [`OpenPiano/openpiano/services/tutorial_flow.py`](https://github.com/Justagwas/OpenPiano/blob/main/OpenPiano/openpiano/services/tutorial_flow.py)
+- Application entry point: [`OpenPiano/OpenPiano.py`](https://github.com/Justagwas/OpenPiano/blob/main/OpenPiano/OpenPiano.py)
 
 </details>
 
 ## Security and OS Warnings
 
-- OpenPiano is open source and intended for local desktop use.
-- Windows SmartScreen may display "Protected your PC" for newer/unsigned binaries.
-- Only run installers downloaded from official OpenPiano release links.
-- For private vulnerability reporting, follow [`.github/SECURITY.md`](https://github.com/Justagwas/OpenPiano/blob/main/.github/SECURITY.md).
+- Windows SmartScreen can show warnings for newer or unsigned binaries.
+- Download from official links only:
+  - <https://github.com/Justagwas/openpiano/releases>
+  - <https://www.justagwas.com/projects/openpiano/download>
+  - <https://sourceforge.net/projects/openpiano/>
+- Security policy and private vulnerability reporting: [`.github/SECURITY.md`](https://github.com/Justagwas/OpenPiano/blob/main/.github/SECURITY.md)
 
 ## Contributing
 
 Contributions are welcome.
 
-Please read [`.github/CONTRIBUTING.md`](https://github.com/Justagwas/OpenPiano/blob/main/.github/CONTRIBUTING.md) before opening issues or pull requests.
+- Start with [`.github/CONTRIBUTING.md`](https://github.com/Justagwas/OpenPiano/blob/main/.github/CONTRIBUTING.md)
+- Follow [`.github/CODE_OF_CONDUCT.md`](https://github.com/Justagwas/OpenPiano/blob/main/.github/CODE_OF_CONDUCT.md)
+- Use [Issues](https://github.com/Justagwas/OpenPiano/issues) for bugs, requests, and questions
+- Wiki: <https://github.com/Justagwas/OpenPiano/wiki>
 
 ## License
 
-Apache License 2.0. See [`LICENSE`](https://github.com/Justagwas/OpenPiano/blob/main/LICENSE).
+Licensed under the Apache License 2.0.
+
+See [`LICENSE`](https://github.com/Justagwas/OpenPiano/blob/main/LICENSE).
 
 ## Contact
 

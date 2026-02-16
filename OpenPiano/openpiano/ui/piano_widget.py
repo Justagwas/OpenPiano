@@ -8,7 +8,7 @@ from PySide6.QtCore import QPoint, QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QMouseEvent, QPaintEvent, QPainter, QPen
 from PySide6.QtWidgets import QWidget
 
-from openpiano.core.config import ANIMATION_PROFILE
+from openpiano.core.config import ANIMATION_PROFILE, UI_SCALE_MAX, UI_SCALE_MIN
 from openpiano.core.keymap import binding_to_label, is_black_key
 from openpiano.core.theme import ThemePalette, apply_key_color_overrides
 
@@ -55,6 +55,7 @@ class PianoWidget(QWidget):
         self._mapping: dict[int, Binding] = {}
         self._labels: dict[int, str] = {}
         self._notes: list[int] = []
+        self._white_note_count = 0
         self._white_rects: list[_KeyRect] = []
         self._black_rects: list[_KeyRect] = []
         self._rect_by_note: dict[int, QRectF] = {}
@@ -102,8 +103,7 @@ class PianoWidget(QWidget):
         return QSize(width, height)
 
     def _desired_size(self) -> tuple[int, int]:
-        whites = [note for note in self._notes if not is_black_key(note)]
-        white_count = max(1, len(whites))
+        white_count = max(1, self._white_note_count)
         width = (self._side_margin() * 2) + (white_count * self._white_width()) + ((white_count - 1) * self._gap())
         height = (self._top_margin() * 2) + self._white_height()
         return width, height
@@ -114,7 +114,7 @@ class PianoWidget(QWidget):
         self.update()
 
     def set_ui_scale(self, scale: float) -> None:
-        clamped = max(0.5, min(2.0, float(scale)))
+        clamped = max(UI_SCALE_MIN, min(UI_SCALE_MAX, float(scale)))
         if abs(clamped - self._ui_scale) < 0.001:
             return
         self._ui_scale = clamped
@@ -127,6 +127,7 @@ class PianoWidget(QWidget):
         self._mapping = dict(mapping)
         self._labels = dict(labels)
         self._notes = sorted(self._mapping.keys())
+        self._white_note_count = sum(1 for note in self._notes if not is_black_key(note))
         if self._selected_keybind_note not in self._mapping:
             self._selected_keybind_note = None
         self._pressed_notes.clear()
@@ -293,6 +294,9 @@ class PianoWidget(QWidget):
         white_outline = QColor(self._theme.border)
         white_top = QColor("#FFFFFF")
         white_bottom = QColor("#C8C8CC")
+        white_outline_pen = QPen(white_outline, 1)
+        white_top_pen = QPen(white_top, 1)
+        white_bottom_pen = QPen(white_bottom, 1)
         draw_labels = self._show_key_labels or self._show_note_labels
 
                                 
@@ -302,16 +306,16 @@ class PianoWidget(QWidget):
                 continue
             fill = self._note_fill_color(item.note)
             painter.fillRect(rect, fill)
-            painter.setPen(QPen(white_outline, 1))
+            painter.setPen(white_outline_pen)
             painter.drawRect(rect)
-            painter.setPen(QPen(white_top, 1))
+            painter.setPen(white_top_pen)
             painter.drawLine(
                 int(rect.left()) + 1,
                 int(rect.top()) + 1,
                 int(rect.right()) - 1,
                 int(rect.top()) + 1,
             )
-            painter.setPen(QPen(white_bottom, 1))
+            painter.setPen(white_bottom_pen)
             painter.drawLine(
                 int(rect.left()) + 1,
                 int(rect.bottom()) - 1,
@@ -324,22 +328,25 @@ class PianoWidget(QWidget):
                                  
         black_top = QColor("#F5F5F5")
         black_side = QColor("#36363A")
+        black_outline_pen = QPen(QColor("#000000"), 1)
+        black_top_pen = QPen(black_top, 1)
+        black_side_pen = QPen(black_side, 1)
         for item in self._black_rects:
             rect = item.rect
             if not rect.intersects(clip_f):
                 continue
             fill = self._note_fill_color(item.note)
             painter.fillRect(rect, fill)
-            painter.setPen(QPen(QColor("#000000"), 1))
+            painter.setPen(black_outline_pen)
             painter.drawRect(rect)
-            painter.setPen(QPen(black_top, 1))
+            painter.setPen(black_top_pen)
             painter.drawLine(
                 int(rect.left()) + 1,
                 int(rect.top()) + 1,
                 int(rect.right()) - 1,
                 int(rect.top()) + 1,
             )
-            painter.setPen(QPen(black_side, 1))
+            painter.setPen(black_side_pen)
             painter.drawLine(
                 int(rect.left()) + 1,
                 int(rect.top()) + 1,
@@ -365,7 +372,7 @@ class PianoWidget(QWidget):
             first.height(),
         )
         if outer.intersects(clip_f):
-            painter.setPen(QPen(QColor(self._theme.border), 1))
+            painter.setPen(white_outline_pen)
             painter.drawRect(outer)
 
         selected = self._selected_keybind_note
@@ -381,7 +388,7 @@ class PianoWidget(QWidget):
     def _draw_labels(self, painter: QPainter, note: int, rect: QRectF, black: bool) -> None:
         binding = self._mapping.get(note)
         note_text = self._labels.get(note, "")
-        hotkey_text = binding_to_label(binding, black_key=black) if binding is not None else ""
+        hotkey_text = binding_to_label(binding) if binding is not None else ""
         if not self._show_key_labels:
             hotkey_text = ""
         if not self._show_note_labels:
