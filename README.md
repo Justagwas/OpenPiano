@@ -98,7 +98,7 @@ OpenPiano can capture note events during a live take and export a standard `.mid
 
 - Website project page (overview + gallery): <https://www.justagwas.com/projects/openpiano>
 - Download page: <https://www.justagwas.com/projects/openpiano/download>
-- Releases: <https://github.com/Justagwas/OpenPiano/releases>
+- Releases: <https://github.com/Justagwas/openpiano/releases>
 
 <details>
 <summary>For Developers</summary>
@@ -132,8 +132,8 @@ py OpenPiano.py
 - Windows SmartScreen can show warnings for newer or unsigned binaries.
 - Download from official links only:
   - <https://github.com/Justagwas/openpiano/releases>
-  - <https://www.justagwas.com/projects/openpiano/download>
-  - <https://sourceforge.net/projects/openpiano/>
+  - <https://www.justagwas.com/projects/openpiano>
+  - <https://sourceforge.net/projects/openpiano>
 - Security policy and private vulnerability reporting: [`.github/SECURITY.md`](https://github.com/Justagwas/OpenPiano/blob/main/.github/SECURITY.md)
 
 ## Contributing
@@ -143,7 +143,7 @@ Contributions are welcome.
 - Start with [`.github/CONTRIBUTING.md`](https://github.com/Justagwas/OpenPiano/blob/main/.github/CONTRIBUTING.md)
 - Follow [`.github/CODE_OF_CONDUCT.md`](https://github.com/Justagwas/OpenPiano/blob/main/.github/CODE_OF_CONDUCT.md)
 - Use [Issues](https://github.com/Justagwas/OpenPiano/issues) for bugs, requests, and questions
-- Wiki: <https://github.com/Justagwas/OpenPiano/wiki>
+- Wiki: <https://github.com/Justagwas/openpiano/wiki>
 
 ## License
 
