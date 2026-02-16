@@ -113,7 +113,7 @@ OpenPiano can capture note events during a live take and export a standard `.mid
 
 ```powershell
 cd OpenPiano
-py -m pip install -r OpenPiano/requirements.txt
+py -m pip install -r requirements.txt
 py OpenPiano.py
 ```
 
