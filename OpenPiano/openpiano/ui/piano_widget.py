@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QPoint, QPointF, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QMouseEvent, QPaintEvent, QPainter, QPen
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QMouseEvent, QPaintEvent, QPainter, QPen
 from PySide6.QtWidgets import QWidget
 
 from openpiano.core.config import ANIMATION_PROFILE, UI_SCALE_MAX, UI_SCALE_MIN
@@ -409,11 +409,21 @@ class PianoWidget(QWidget):
             lines = [line for line in text.split("\n") if line]
             if not lines:
                 return
-            lh = max(self._sp(9), int(line_height))
+            fitted_size = max(self._sp(6), int(font_size))
+            width_limit = max(1, int(rect.width()) - self._sp(2))
+            while fitted_size > self._sp(6):
+                font = QFont("Segoe UI", fitted_size, QFont.Weight.Bold)
+                metrics = QFontMetrics(font)
+                if max(metrics.horizontalAdvance(line) for line in lines) <= width_limit:
+                    break
+                fitted_size -= 1
+            draw_font = QFont("Segoe UI", fitted_size, QFont.Weight.Bold)
+            metrics = QFontMetrics(draw_font)
+            lh = max(self._sp(9), int(line_height), metrics.height())
             gap = max(0, int(line_gap))
             total_height = (lh * len(lines)) - gap
             start_y = bottom - total_height
-            painter.setFont(QFont("Segoe UI", font_size, QFont.Weight.Bold))
+            painter.setFont(draw_font)
             for idx, line in enumerate(lines):
                 y = start_y + (idx * lh)
                 painter.drawText(

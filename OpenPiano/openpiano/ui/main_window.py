@@ -4,14 +4,16 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
-from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, Signal, QTimer
-from PySide6.QtGui import QColor, QIcon
+from PySide6.QtCore import QEvent, QEventLoop, QPoint, QPointF, QRect, QSize, Qt, Signal, QTimer
+from PySide6.QtGui import QColor, QGuiApplication, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
+    QAbstractItemView,
     QButtonGroup,
     QCheckBox,
     QColorDialog,
     QComboBox,
+    QDialog,
     QFrame,
     QGraphicsDropShadowEffect,
     QGridLayout,
@@ -20,6 +22,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QProgressDialog,
     QScrollArea,
     QSlider,
     QSizePolicy,
@@ -35,6 +38,7 @@ from openpiano.core.config import (
     UI_SCALE_MIN,
     UI_SCALE_STEP,
 )
+from openpiano.core.keymap import current_layout_demo_rows, qwerty_demo_rows
 from openpiano.core.object_tree import is_descendant_of
 from openpiano.core.theme import ThemePalette
 from openpiano.ui.modal_utils import (
@@ -63,6 +67,8 @@ ANIMATION_SPEED_LABELS = {
     "very_slow": "Very Slow",
 }
 
+FOOTER_ICON_SIZE = 19
+
 
 class MainWindow(QMainWindow):
     
@@ -74,10 +80,12 @@ class MainWindow(QMainWindow):
     velocityChanged = Signal(int)
     transposeChanged = Signal(int)
     sustainPercentChanged = Signal(int)
+    sustainFadeChanged = Signal(int)
     holdSpaceSustainChanged = Signal(bool)
     showKeyLabelsChanged = Signal(bool)
     showNoteLabelsChanged = Signal(bool)
     changeKeybindsRequested = Signal()
+    changeKeyboardLayoutRequested = Signal()
     doneKeybindsRequested = Signal()
     discardKeybindsRequested = Signal()
     keybindEditActionBlocked = Signal()
@@ -102,6 +110,7 @@ class MainWindow(QMainWindow):
     tutorialFinishRequested = Signal()
     websiteRequested = Signal()
     resetDefaultsRequested = Signal()
+    updateProgressCanceled = Signal()
 
     def __init__(self, theme: ThemePalette, icon_path: Path | None = None) -> None:
         super().__init__()
@@ -115,6 +124,7 @@ class MainWindow(QMainWindow):
         self._tutorial_mode = False
         self._recording_active = False
         self._keybind_edit_active = False
+        self._window_pinned = False
         self._ui_scale_steps = int(round((UI_SCALE_MAX - UI_SCALE_MIN) / UI_SCALE_STEP))
         self._ui_scale_commit_timer = QTimer(self)
         self._ui_scale_commit_timer.setSingleShot(True)
@@ -130,6 +140,7 @@ class MainWindow(QMainWindow):
         self._wheel_allowed_widget_ids: set[int] = set()
         self._global_event_filter_installed = False
         self._last_stylesheet = ""
+        self._update_progress_dialog: QProgressDialog | None = None
         self._key_color_values: dict[str, str] = {
             "white_key": "",
             "white_key_pressed": "",
@@ -261,6 +272,16 @@ class MainWindow(QMainWindow):
             value_text="100%",
             on_value_changed=self._on_sustain_percent_changed,
         )
+        self.sustain_fade_slider, self.sustain_fade_value = self._add_labeled_slider_row(
+            self.sound_card,
+            sound_layout,
+            label_text="Sustain Fade",
+            slider_object_name="sustainFadeSlider",
+            slider_range=(0, 100),
+            slider_value=0,
+            value_text="0%",
+            on_value_changed=self._on_sustain_fade_changed,
+        )
 
         self.keyboard_card, keyboard_layout = self._create_section_card("Keyboard", self.settings_body)
         layout.addWidget(self.keyboard_card)
@@ -331,6 +352,9 @@ class MainWindow(QMainWindow):
         self.change_keybinds_button = QPushButton("Change Keybinds", self.keybind_row_widget)
         self.change_keybinds_button.setObjectName("actionButton")
         self.change_keybinds_button.clicked.connect(self.changeKeybindsRequested.emit)
+        self.change_layout_button = QPushButton("Change Layout", self.keybind_row_widget)
+        self.change_layout_button.setObjectName("actionButton")
+        self.change_layout_button.clicked.connect(self.changeKeyboardLayoutRequested.emit)
         self.save_keybinds_button = QPushButton("Save", self.keybind_row_widget)
         self.save_keybinds_button.setObjectName("actionButton")
         self.save_keybinds_button.clicked.connect(self.doneKeybindsRequested.emit)
@@ -341,6 +365,7 @@ class MainWindow(QMainWindow):
         self.discard_keybinds_button.setVisible(False)
         keybind_row.addWidget(keybind_label)
         keybind_row.addWidget(self.change_keybinds_button)
+        keybind_row.addWidget(self.change_layout_button)
         keybind_row.addWidget(self.save_keybinds_button)
         keybind_row.addWidget(self.discard_keybinds_button)
         keybind_row.addStretch(1)
@@ -637,8 +662,11 @@ class MainWindow(QMainWindow):
             footer_layout.setContentsMargins(self._sp(6), 0, self._sp(6), 0)
             footer_layout.setSpacing(self._sp(8))
         if hasattr(self, "theme_toggle_button"):
-            icon_px = max(12, self._sp(14))
+            icon_px = max(18, self._sp(FOOTER_ICON_SIZE - 2))
             self.theme_toggle_button.setIconSize(QSize(icon_px, icon_px))
+            if hasattr(self, "pin_toggle_button"):
+                self.pin_toggle_button.setIconSize(QSize(icon_px, icon_px))
+                self._refresh_pin_toggle_icon()
         QTimer.singleShot(0, self._sync_all_notes_off_width)
 
     def _create_section_card(self, title: str, parent: QWidget) -> tuple[QFrame, QVBoxLayout]:
@@ -658,6 +686,7 @@ class MainWindow(QMainWindow):
             self.velocity_slider,
             self.transpose_slider,
             self.sustain_slider,
+            self.sustain_fade_slider,
             self.ui_scale_slider,
         )
 
@@ -730,8 +759,16 @@ class MainWindow(QMainWindow):
         self.theme_toggle_button = QPushButton("", self.footer_bar)
         self.theme_toggle_button.setObjectName("footerIcon")
         self.theme_toggle_button.setFlat(True)
-        self.theme_toggle_button.setIconSize(QSize(self._sp(18), self._sp(18)))
+        self.theme_toggle_button.setIconSize(QSize(self._sp(FOOTER_ICON_SIZE), self._sp(FOOTER_ICON_SIZE)))
         self.theme_toggle_button.clicked.connect(self._on_theme_toggle_clicked)
+
+        self.pin_toggle_button = QPushButton("", self.footer_bar)
+        self.pin_toggle_button.setObjectName("footerIcon")
+        self.pin_toggle_button.setFlat(True)
+        self.pin_toggle_button.setCheckable(True)
+        self.pin_toggle_button.setChecked(False)
+        self.pin_toggle_button.setIconSize(QSize(self._sp(FOOTER_ICON_SIZE), self._sp(FOOTER_ICON_SIZE)))
+        self.pin_toggle_button.toggled.connect(self._on_pin_toggled)
 
         self.settings_toggle_button = QPushButton("Show Settings", self.footer_bar)
         self.settings_toggle_button.setObjectName("footerLink")
@@ -768,6 +805,7 @@ class MainWindow(QMainWindow):
         version_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
         row.addWidget(self.theme_toggle_button)
+        row.addWidget(self.pin_toggle_button)
         row.addWidget(self.settings_toggle_button)
         row.addWidget(self.stats_toggle_button)
         row.addWidget(self.controls_toggle_button)
@@ -784,9 +822,85 @@ class MainWindow(QMainWindow):
         size = int(self.theme_toggle_button.iconSize().width())
         return build_theme_icon(mode=mode, size=size, color=self.theme.text_primary)
 
+    def _build_pin_icon(self, pinned: bool) -> QIcon:
+        if not hasattr(self, "pin_toggle_button"):
+            return QIcon()
+        size = int(self.pin_toggle_button.iconSize().width())
+        if size <= 0:
+            size = 16
+        screen = QGuiApplication.primaryScreen()
+        dpr = float(screen.devicePixelRatio()) if screen is not None else 1.0
+        px = int(round(size * dpr))
+        icon = QPixmap(px, px)
+        icon.setDevicePixelRatio(dpr)
+        icon.fill(Qt.transparent)
+        color = QColor(self.theme.accent if pinned else self.theme.text_primary)
+        painter = QPainter(icon)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        pen = QPen(color, max(1.1, size * 0.10), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        center = QPointF(size * 0.5, size * 0.56)
+        if not pinned:
+            painter.translate(center)
+            painter.rotate(-28)
+            painter.translate(-center)
+        head_radius = size * 0.21
+        head_center = QPointF(center.x(), center.y() - size * 0.30)
+        painter.setBrush(color)
+        painter.drawEllipse(head_center, head_radius, head_radius)
+        painter.setBrush(Qt.NoBrush)
+        stem_top = QPointF(center.x(), head_center.y() + head_radius * 0.95)
+        stem_mid = QPointF(center.x(), center.y() + size * 0.12)
+        painter.drawLine(stem_top, stem_mid)
+        cross_y = head_center.y() + head_radius * 0.45
+        cross_half = size * 0.14
+        painter.drawLine(
+            QPointF(center.x() - cross_half, cross_y),
+            QPointF(center.x() + cross_half, cross_y),
+        )
+        needle_top = stem_mid
+        needle_bottom = QPointF(center.x(), center.y() + size * 0.40)
+        painter.drawLine(needle_top, needle_bottom)
+        painter.end()
+        return QIcon(icon)
+
+    def _refresh_pin_toggle_icon(self) -> None:
+        if not hasattr(self, "pin_toggle_button"):
+            return
+        self.pin_toggle_button.setIcon(self._build_pin_icon(self._window_pinned))
+        self._update_pin_tooltip(self._window_pinned)
+
     def _on_theme_toggle_clicked(self) -> None:
         next_mode = "light" if self._theme_mode == "dark" else "dark"
         self.themeModeChanged.emit(next_mode)
+
+    def _on_pin_toggled(self, checked: bool) -> None:
+        self._apply_window_pin_state(bool(checked))
+
+    def _apply_window_pin_state(self, enabled: bool) -> None:
+        pinned = bool(enabled)
+        if getattr(self, "_window_pinned", False) == pinned:
+            self._refresh_pin_toggle_icon()
+            return
+        self._window_pinned = pinned
+        was_maximized = self.isMaximized()
+        was_fullscreen = self.isFullScreen()
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, pinned)
+        self.show()
+        if was_fullscreen:
+            self.showFullScreen()
+        elif was_maximized:
+            self.showMaximized()
+        self._apply_windows_title_bar_theme()
+        self._refresh_pin_toggle_icon()
+
+    def _update_pin_tooltip(self, pinned: bool) -> None:
+        if not hasattr(self, "pin_toggle_button"):
+            return
+        self.pin_toggle_button.setToolTip(
+            "Disable always on top" if pinned else "Keep window always on top"
+        )
 
     def _build_tutorial_overlay(self, parent: QWidget) -> None:
         self._tutorial_overlay = TutorialOverlay(self.theme, parent)
@@ -825,7 +939,8 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _set_widget_cursor(widget: QWidget) -> None:
-        if widget.isEnabled() and widget.isVisible():
+        # Keep cursor policy stable across hide/show and parent visibility changes.
+        if widget.isEnabled():
             widget.setCursor(Qt.PointingHandCursor)
         else:
             widget.unsetCursor()
@@ -889,7 +1004,7 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _is_interactive_control(watched: object) -> bool:
-        return isinstance(watched, (QPushButton, QComboBox, QSlider, QCheckBox))
+        return isinstance(watched, (QPushButton, QComboBox, QSlider, QCheckBox, QAbstractItemView))
 
     @staticmethod
     def _scroll_area_by_wheel(scroll_area: QScrollArea, delta_y: int) -> None:
@@ -907,8 +1022,9 @@ class MainWindow(QMainWindow):
     def eventFilter(self, watched, event):                          
         event_type = event.type()
         in_window_scope = watched is self or is_descendant_of(watched, self)
-        wheel_popup_target = event_type == QEvent.Wheel and self._wheel_allowed(watched)
-        if not in_window_scope and not wheel_popup_target:
+        popup_target = self._wheel_allowed(watched)
+        wheel_popup_target = event_type == QEvent.Wheel and popup_target
+        if not in_window_scope and not popup_target:
             return super().eventFilter(watched, event)
 
         if event_type in {
@@ -920,7 +1036,10 @@ class MainWindow(QMainWindow):
             QEvent.StyleChange,
             QEvent.Polish,
         }:
-            if isinstance(watched, QWidget) and self._is_interactive_control(watched):
+            if (
+                isinstance(watched, QWidget)
+                and (self._is_interactive_control(watched) or self._wheel_allowed(watched))
+            ):
                 self._set_widget_cursor(watched)
 
         if self._tutorial_mode and not self._is_tutorial_descendant(watched):
@@ -1165,6 +1284,7 @@ class MainWindow(QMainWindow):
             #velocitySlider,
             #transposeSlider,
             #sustainSlider,
+            #sustainFadeSlider,
             #uiScaleSlider {{
                 min-height: {slider_min_h}px;
                 background: transparent;
@@ -1240,10 +1360,10 @@ class MainWindow(QMainWindow):
                 background: transparent;
                 color: {self.theme.text_primary};
                 border: none;
-                min-width: {self._sp(18)}px;
-                min-height: {self._sp(18)}px;
-                max-width: {self._sp(18)}px;
-                max-height: {self._sp(18)}px;
+                min-width: {self._sp(FOOTER_ICON_SIZE)}px;
+                min-height: {self._sp(FOOTER_ICON_SIZE)}px;
+                max-width: {self._sp(FOOTER_ICON_SIZE)}px;
+                max-height: {self._sp(FOOTER_ICON_SIZE)}px;
                 padding: 0;
                 margin: 0;
             }}
@@ -1290,8 +1410,7 @@ class MainWindow(QMainWindow):
         self.centralWidget().layout().activate()
         self.adjustSize()
         target_size = self.sizeHint()
-        if self.size() != target_size:
-            self.setFixedSize(target_size)
+        self.setFixedSize(target_size)
         self._position_recording_indicator()
         QTimer.singleShot(0, self._sync_all_notes_off_width)
         self._sync_tutorial_overlay()
@@ -1357,6 +1476,10 @@ class MainWindow(QMainWindow):
         self.sustain_value.setText(f"{int(value)}%")
         self.sustainPercentChanged.emit(int(value))
 
+    def _on_sustain_fade_changed(self, value: int) -> None:
+        self.sustain_fade_value.setText(f"{int(value)}%")
+        self.sustainFadeChanged.emit(int(value))
+
     def _on_ui_scale_value_changed(self, value: int) -> None:
         scale = UI_SCALE_MIN + (int(value) * UI_SCALE_STEP)
         scale = max(UI_SCALE_MIN, min(UI_SCALE_MAX, round(scale, 2)))
@@ -1395,12 +1518,15 @@ class MainWindow(QMainWindow):
             "black_key_pressed": self.theme.black_key_pressed,
         }
         current = (self._key_color_values.get(target) or fallback.get(target) or self.theme.accent)
-        color = QColorDialog.getColor(
-            QColor(current),
-            self,
-            "Choose key color",
-        )
+        dialog = QColorDialog(QColor(current), self)
+        dialog.setOption(QColorDialog.DontUseNativeDialog, True)
+        dialog.setWindowTitle("Choose key color")
+        apply_dialog_button_cursors_util(dialog)
+        accepted = dialog.exec() == QDialog.Accepted
         self._restore_cursor_state_after_modal()
+        if not accepted:
+            return
+        color = dialog.selectedColor()
         if not color.isValid():
             return
         hex_color = color.name(QColor.HexRgb)
@@ -1426,6 +1552,22 @@ class MainWindow(QMainWindow):
 
     def _message_box_stylesheet(self) -> str:
         return message_box_stylesheet_util(self.theme)
+
+    def _update_progress_stylesheet(self) -> str:
+        return (
+            self._message_box_stylesheet()
+            + f"""
+            QProgressBar {{
+                border: 1px solid #2a2a2a;
+                border-radius: 4px;
+                text-align: center;
+            }}
+            QProgressBar::chunk {{
+                background-color: #2fbf71;
+                border-radius: 3px;
+            }}
+            """
+        )
 
     def _show_themed_message(
         self,
@@ -1492,6 +1634,425 @@ class MainWindow(QMainWindow):
             default_button=default_button,
         )
         return response == QMessageBox.Yes
+
+    def ask_update_install_preference(
+        self,
+        *,
+        latest_version: str,
+        details_text: str = "",
+        install_supported: bool = True,
+    ) -> tuple[bool, bool]:
+        dialog = QDialog(self)
+        dialog.setModal(True)
+        dialog.setWindowTitle("Update available")
+        window_icon = self.windowIcon()
+        if not window_icon.isNull():
+            dialog.setWindowIcon(window_icon)
+        dialog.setStyleSheet(self._message_box_stylesheet())
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(self._sp(14), self._sp(12), self._sp(14), self._sp(12))
+        layout.setSpacing(self._sp(10))
+
+        title = QLabel(f"Version {str(latest_version or 'latest')} is available.", dialog)
+        title.setStyleSheet(f"font: 700 {self._sp(9)}pt 'Segoe UI';")
+        layout.addWidget(title)
+
+        auto_install_checkbox = QCheckBox("Install update automatically", dialog)
+        auto_install_checkbox.setChecked(bool(install_supported))
+        auto_install_checkbox.setEnabled(bool(install_supported))
+        layout.addWidget(auto_install_checkbox)
+
+        mode_hint = QLabel("", dialog)
+        mode_hint.setWordWrap(True)
+        mode_hint.setStyleSheet(f"font: 600 {self._sp(8)}pt 'Segoe UI';")
+
+        def _refresh_hint() -> None:
+            if auto_install_checkbox.isEnabled() and auto_install_checkbox.isChecked():
+                mode_hint.setText(
+                    "OpenPiano will download, verify, install the update, and relaunch automatically."
+                )
+            else:
+                if auto_install_checkbox.isEnabled():
+                    mode_hint.setText(
+                        "OpenPiano will open the download page so you can install the update manually."
+                    )
+                else:
+                    mode_hint.setText(
+                        "Automatic install is unavailable here. OpenPiano will open the download page."
+                    )
+
+        auto_install_checkbox.toggled.connect(lambda _checked=False: _refresh_hint())
+        _refresh_hint()
+        layout.addWidget(mode_hint)
+
+        extra = str(details_text or "").strip()
+        if extra:
+            details_label = QLabel(extra, dialog)
+            details_label.setWordWrap(True)
+            details_label.setStyleSheet(f"font: 600 {self._sp(8)}pt 'Segoe UI';")
+            layout.addWidget(details_label)
+
+        buttons = QHBoxLayout()
+        buttons.setContentsMargins(0, 0, 0, 0)
+        buttons.setSpacing(self._sp(8))
+        buttons.addStretch(1)
+        later_button = QPushButton("Not now", dialog)
+        continue_button = QPushButton("Update", dialog)
+        continue_button.setDefault(True)
+        buttons.addWidget(later_button)
+        buttons.addWidget(continue_button)
+        layout.addLayout(buttons)
+
+        later_button.clicked.connect(dialog.reject)
+        continue_button.clicked.connect(dialog.accept)
+
+        apply_dialog_button_cursors_util(dialog)
+        self._apply_windows_title_bar_theme(dialog)
+        accepted = dialog.exec() == QDialog.Accepted
+        auto_install = bool(auto_install_checkbox.isEnabled() and auto_install_checkbox.isChecked())
+        self._restore_cursor_state_after_modal()
+        return accepted, auto_install
+
+    def ask_update_handoff(
+        self,
+        *,
+        version: str,
+        default_restart: bool = True,
+        requires_elevation: bool = False,
+    ) -> tuple[bool, bool]:
+        dialog = QDialog(self)
+        dialog.setModal(True)
+        dialog.setWindowTitle("Install update")
+        window_icon = self.windowIcon()
+        if not window_icon.isNull():
+            dialog.setWindowIcon(window_icon)
+        dialog.setStyleSheet(self._message_box_stylesheet())
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(self._sp(14), self._sp(12), self._sp(14), self._sp(12))
+        layout.setSpacing(self._sp(10))
+
+        title = QLabel("Update is ready to install", dialog)
+        title.setStyleSheet(f"font: 700 {self._sp(9)}pt 'Segoe UI';")
+        body = QLabel(
+            (
+                f"OpenPiano v{str(version or 'latest')} has been downloaded.\n\n"
+                "The installer will now take over.\n\n"
+                "Click Update to close OpenPiano and begin installation."
+            ),
+            dialog,
+        )
+        body.setWordWrap(True)
+        body.setStyleSheet(f"font: 600 {self._sp(8)}pt 'Segoe UI';")
+        uac_hint = QLabel(
+            "Windows may ask for administrator permission to continue this update.",
+            dialog,
+        )
+        uac_hint.setWordWrap(True)
+        uac_hint.setStyleSheet(f"font: 600 {self._sp(8)}pt 'Segoe UI';")
+        uac_hint.setVisible(bool(requires_elevation))
+
+        restart_checkbox = QCheckBox("Restart OpenPiano after update", dialog)
+        restart_checkbox.setChecked(bool(default_restart))
+
+        buttons = QHBoxLayout()
+        buttons.setContentsMargins(0, 0, 0, 0)
+        buttons.setSpacing(self._sp(8))
+        buttons.addStretch(1)
+        abort_button = QPushButton("Abort", dialog)
+        continue_button = QPushButton("Update", dialog)
+        continue_button.setDefault(True)
+        buttons.addWidget(abort_button)
+        buttons.addWidget(continue_button)
+
+        layout.addWidget(title)
+        layout.addWidget(body)
+        layout.addWidget(uac_hint)
+        layout.addWidget(restart_checkbox)
+        layout.addLayout(buttons)
+
+        abort_button.clicked.connect(dialog.reject)
+        continue_button.clicked.connect(dialog.accept)
+
+        apply_dialog_button_cursors_util(dialog)
+        self._apply_windows_title_bar_theme(dialog)
+        accepted = dialog.exec() == QDialog.Accepted
+        restart = bool(restart_checkbox.isChecked())
+        self._restore_cursor_state_after_modal()
+        return accepted, restart
+
+    def show_update_progress(self, title: str, text: str, *, allow_cancel: bool = True) -> None:
+        dialog = self._update_progress_dialog
+        if dialog is None:
+            dialog = QProgressDialog(self)
+            dialog.setWindowModality(Qt.ApplicationModal)
+            dialog.canceled.connect(self.updateProgressCanceled.emit)
+            dialog.setMinimumDuration(0)
+            dialog.setAutoClose(False)
+            dialog.setAutoReset(False)
+            dialog.setRange(0, 100)
+            dialog.setValue(0)
+            window_icon = self.windowIcon()
+            if not window_icon.isNull():
+                dialog.setWindowIcon(window_icon)
+            dialog.setStyleSheet(self._update_progress_stylesheet())
+            self._apply_windows_title_bar_theme(dialog)
+            self._update_progress_dialog = dialog
+        if allow_cancel:
+            dialog.setCancelButtonText("Cancel")
+        else:
+            dialog.setCancelButton(None)
+        dialog.setWindowTitle(str(title or "Updating"))
+        dialog.setLabelText(str(text or ""))
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def set_update_progress(self, value: int, text: str = "") -> None:
+        dialog = self._update_progress_dialog
+        if dialog is None:
+            return
+        clamped = max(0, min(100, int(value)))
+        if text:
+            dialog.setLabelText(str(text))
+        dialog.setValue(clamped)
+        dialog.repaint()
+
+    def close_update_progress(self) -> None:
+        dialog = self._update_progress_dialog
+        if dialog is None:
+            return
+        self._update_progress_dialog = None
+        dialog.close()
+        dialog.deleteLater()
+
+    def _build_layout_demo_widget(self, rows: tuple[tuple[str, ...], ...], parent: QWidget) -> QWidget:
+        container = QWidget(parent)
+        container_layout = QVBoxLayout(container)
+        container_layout.setContentsMargins(0, 0, 0, 0)
+        container_layout.setSpacing(self._sp(4))
+        row_offsets = (self._sp(0), self._sp(10), self._sp(18), self._sp(26))
+        for index, row in enumerate(rows):
+            row_widget = QWidget(container)
+            row_layout = QHBoxLayout(row_widget)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(self._sp(5))
+            row_layout.addSpacing(row_offsets[index] if index < len(row_offsets) else self._sp(26))
+            for token in row:
+                text = str(token or "?")
+                keycap = QLabel(text, row_widget)
+                keycap.setObjectName("layoutKeyCap")
+                keycap.setAlignment(Qt.AlignCenter)
+                width_units = max(1, min(3, len(text)))
+                keycap.setFixedSize(self._sp(22 + (width_units * 8)), self._sp(24))
+                row_layout.addWidget(keycap)
+            row_layout.addStretch(1)
+            container_layout.addWidget(row_widget)
+        container_layout.addStretch(1)
+        return container
+
+    def ask_keyboard_input_mode_choice(self) -> str | None:
+        root = self.centralWidget()
+        if root is None:
+            return None
+
+        qwerty_rows = qwerty_demo_rows()
+        layout_rows = current_layout_demo_rows()
+        choice: dict[str, str | None] = {"mode": None}
+
+        def _rgba_css(color: QColor) -> str:
+            return f"rgba({color.red()}, {color.green()}, {color.blue()}, {color.alpha()})"
+
+        if self._theme_mode == "light":
+            overlay_color = QColor(15, 20, 28, 140)
+            demo_card_color = QColor(self.theme.panel_bg)
+            demo_card_color.setAlpha(244)
+            side_card_color = QColor(self.theme.panel_bg).darker(103)
+            side_card_color.setAlpha(236)
+            keycap_color = QColor(self.theme.panel_bg).darker(110)
+            keycap_color.setAlpha(246)
+        else:
+            overlay_color = QColor(0, 0, 0, 212)
+            demo_card_color = QColor(self.theme.panel_bg)
+            demo_card_color.setAlpha(222)
+            side_card_color = QColor(self.theme.panel_bg).lighter(112)
+            side_card_color.setAlpha(214)
+            keycap_color = QColor(self.theme.panel_bg).lighter(135)
+            keycap_color.setAlpha(224)
+
+        overlay = QFrame(root)
+        overlay.setObjectName("keyboardLayoutChoiceOverlay")
+        overlay.setGeometry(root.rect())
+        overlay.setStyleSheet(
+            f"""
+            QFrame#keyboardLayoutChoiceOverlay {{
+                background: {_rgba_css(overlay_color)};
+            }}
+            QFrame#layoutDemoCard {{
+                background: {_rgba_css(demo_card_color)};
+                border: 2px solid {self.theme.border};
+                border-radius: {self._sp(12)}px;
+            }}
+            QFrame#layoutSideCard {{
+                background: {_rgba_css(side_card_color)};
+                border: 1px solid {self.theme.border};
+                border-radius: {self._sp(10)}px;
+            }}
+            QLabel#layoutOverlayTitle {{
+                color: {self.theme.text_primary};
+                font: 900 {self._sp(12)}pt "Segoe UI";
+            }}
+            QLabel#layoutOverlaySub {{
+                color: {self.theme.text_secondary};
+                font: 600 {self._sp(9)}pt "Segoe UI";
+            }}
+            QLabel#layoutSideTitle {{
+                color: {self.theme.text_primary};
+                font: 700 {self._sp(10)}pt "Segoe UI";
+            }}
+            QLabel#layoutSideSub {{
+                color: {self.theme.text_secondary};
+                font: 600 {self._sp(8)}pt "Segoe UI";
+            }}
+            QFrame#layoutVSplit {{
+                background: {self.theme.border};
+                min-width: 1px;
+                max-width: 1px;
+            }}
+            QLabel#layoutKeyCap {{
+                color: {self.theme.text_primary};
+                background: {_rgba_css(keycap_color)};
+                border: 1px solid {self.theme.border};
+                border-bottom: 2px solid {self.theme.accent_hover};
+                border-radius: {self._sp(6)}px;
+                font: 700 {self._sp(8)}pt "Consolas";
+                padding: 0px {self._sp(4)}px;
+            }}
+            QPushButton#layoutChoiceButton {{
+                background: {self.theme.panel_bg};
+                color: {self.theme.text_primary};
+                border: 1px solid {self.theme.border};
+                border-radius: {self._sp(7)}px;
+                padding: {self._sp(6)}px {self._sp(10)}px;
+                font: 700 {self._sp(9)}pt "Segoe UI";
+            }}
+            QPushButton#layoutChoiceButton:hover {{
+                background: {self.theme.accent};
+                border-color: {self.theme.accent_hover};
+            }}
+            """
+        )
+
+        piano_top_left = self.piano_widget.mapTo(root, QPoint(0, 0))
+        piano_rect = QRect(piano_top_left, self.piano_widget.size()).adjusted(6, 6, -6, -6)
+        if not piano_rect.isValid():
+            piano_rect = QRect(
+                self._sp(12),
+                self._sp(90),
+                max(self._sp(420), overlay.width() - self._sp(24)),
+                self._sp(220),
+            )
+        demo_top = max(self._sp(50), piano_rect.top() - self._sp(8))
+        demo_bottom = min(overlay.height() - self._sp(22), piano_rect.bottom() + self._sp(152))
+        min_demo_height = self._sp(312)
+        if demo_bottom - demo_top < min_demo_height:
+            demo_bottom = min(overlay.height() - self._sp(12), demo_top + min_demo_height)
+        demo_rect = QRect(piano_rect.left(), demo_top, piano_rect.width(), max(self._sp(240), demo_bottom - demo_top))
+
+        title = QLabel("Choose Keyboard Mapping", overlay)
+        title.setObjectName("layoutOverlayTitle")
+        title.adjustSize()
+        title_x = max(0, (overlay.width() - title.width()) // 2)
+        title_y = max(self._sp(10), demo_rect.top() - self._sp(42))
+        title.move(title_x, title_y)
+
+        demo = QFrame(overlay)
+        demo.setObjectName("layoutDemoCard")
+        demo.setGeometry(demo_rect)
+        demo_outer = QVBoxLayout(demo)
+        demo_outer.setContentsMargins(self._sp(14), self._sp(10), self._sp(14), self._sp(10))
+        demo_outer.setSpacing(self._sp(10))
+
+        split_layout = QHBoxLayout()
+        split_layout.setContentsMargins(0, 0, 0, 0)
+        split_layout.setSpacing(self._sp(12))
+
+        left = QFrame(demo)
+        left.setObjectName("layoutSideCard")
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(self._sp(10), self._sp(8), self._sp(10), self._sp(8))
+        left_layout.setSpacing(self._sp(7))
+        left_title = QLabel("QWERTY Layout", left)
+        left_title.setObjectName("layoutSideTitle")
+        left_sub = QLabel("Uses standard QWERTY layout", left)
+        left_sub.setObjectName("layoutSideSub")
+        left_preview = self._build_layout_demo_widget(qwerty_rows, left)
+        left_choose = QPushButton("Use QWERTY Layout", left)
+        left_choose.setObjectName("layoutChoiceButton")
+        left_choose.clicked.connect(lambda _checked=False: _set_choice("qwerty"))
+        left_layout.addWidget(left_title)
+        left_layout.addWidget(left_sub)
+        left_layout.addWidget(left_preview, 1)
+        left_layout.addWidget(left_choose, 0, Qt.AlignLeft)
+
+        v_split = QFrame(demo)
+        v_split.setObjectName("layoutVSplit")
+
+        right = QFrame(demo)
+        right.setObjectName("layoutSideCard")
+        right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(self._sp(10), self._sp(8), self._sp(10), self._sp(8))
+        right_layout.setSpacing(self._sp(7))
+        right_title = QLabel("Current Keyboard Layout", right)
+        right_title.setObjectName("layoutSideTitle")
+        right_sub = QLabel("Uses letters from your keyboard language", right)
+        right_sub.setObjectName("layoutSideSub")
+        right_preview = self._build_layout_demo_widget(layout_rows, right)
+        right_choose = QPushButton("Use Current Layout", right)
+        right_choose.setObjectName("layoutChoiceButton")
+        right_choose.clicked.connect(lambda _checked=False: _set_choice("layout"))
+        right_layout.addWidget(right_title)
+        right_layout.addWidget(right_sub)
+        right_layout.addWidget(right_preview, 1)
+        right_layout.addWidget(right_choose, 0, Qt.AlignLeft)
+
+        split_layout.addWidget(left, 1)
+        split_layout.addWidget(v_split)
+        split_layout.addWidget(right, 1)
+        demo_outer.addLayout(split_layout, 1)
+
+        cancel_row = QHBoxLayout()
+        cancel_row.setContentsMargins(0, 0, 0, 0)
+        cancel_row.setSpacing(self._sp(8))
+        cancel_row.addStretch(1)
+        cancel_button = QPushButton("Decide Later (Use Current Layout)", demo)
+        cancel_button.setObjectName("layoutChoiceButton")
+        cancel_row.addWidget(cancel_button)
+        cancel_row.addStretch(1)
+        demo_outer.addLayout(cancel_row)
+
+        loop = QEventLoop(self)
+
+        def _finish() -> None:
+            if loop.isRunning():
+                loop.quit()
+
+        def _set_choice(mode: str) -> None:
+            choice["mode"] = mode
+            _finish()
+
+        cancel_button.clicked.connect(lambda _checked=False: _set_choice("layout"))
+        overlay.destroyed.connect(_finish)
+
+        apply_dialog_button_cursors_util(overlay)
+        overlay.show()
+        overlay.raise_()
+        overlay.setFocus(Qt.ActiveWindowFocusReason)
+        loop.exec()
+        overlay.deleteLater()
+        self._restore_cursor_state_after_modal()
+        return str(choice["mode"] or "")
 
     def _apply_windows_title_bar_theme(self, target: QWidget | None = None) -> None:
         if sys.platform != "win32":
@@ -1641,6 +2202,10 @@ class MainWindow(QMainWindow):
         clamped = max(0, min(100, int(value)))
         self._set_slider_and_label(self.sustain_slider, self.sustain_value, clamped, f"{clamped}%")
 
+    def set_sustain_fade(self, value: int) -> None:
+        clamped = max(0, min(100, int(value)))
+        self._set_slider_and_label(self.sustain_fade_slider, self.sustain_fade_value, clamped, f"{clamped}%")
+
     def set_hold_space_sustain_mode(self, enabled: bool) -> None:
         self.hold_space_sustain_checkbox.blockSignals(True)
         self.hold_space_sustain_checkbox.setChecked(bool(enabled))
@@ -1657,6 +2222,7 @@ class MainWindow(QMainWindow):
     def set_keybind_edit_mode(self, active: bool, status_text: str = "") -> None:
         self._keybind_edit_active = bool(active)
         self.change_keybinds_button.setVisible(not self._keybind_edit_active)
+        self.change_layout_button.setVisible(not self._keybind_edit_active)
         self.save_keybinds_button.setVisible(self._keybind_edit_active)
         self.save_keybinds_button.setEnabled(self._keybind_edit_active)
         self.discard_keybinds_button.setVisible(self._keybind_edit_active)
@@ -1681,8 +2247,10 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "theme_toggle_button"):
             self._apply_windows_title_bar_theme()
             return
-        icon_px = max(16, self._sp(18))
+        icon_px = max(20, self._sp(FOOTER_ICON_SIZE))
         self.theme_toggle_button.setIconSize(QSize(icon_px, icon_px))
+        if hasattr(self, "pin_toggle_button"):
+            self.pin_toggle_button.setIconSize(QSize(icon_px, icon_px))
         if self._theme_mode == "dark":
             self.theme_toggle_button.setText("")
             self.theme_toggle_button.setIcon(self._build_theme_icon("moon"))

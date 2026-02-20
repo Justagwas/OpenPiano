@@ -1,4 +1,4 @@
-﻿---
+---
 name: Question
 about: Ask a usage or development question
 title: "[Question]: "

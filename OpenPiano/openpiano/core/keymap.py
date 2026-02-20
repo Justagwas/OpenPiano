@@ -1,12 +1,14 @@
 
 from __future__ import annotations
 
+import sys
 from typing import Literal, TypeAlias
 
 BindingSource: TypeAlias = Literal["keyboard", "mouse"]
 Binding: TypeAlias = tuple[BindingSource, str, bool, bool, bool]
 BindingSpec: TypeAlias = str | tuple[str, str]
 PianoMode: TypeAlias = Literal["61", "88"]
+KeyboardInputMode: TypeAlias = Literal["layout", "qwerty"]
 
 MIDI_START_61 = 36
 MIDI_END_61 = 96
@@ -162,6 +164,45 @@ MODIFIER_KEYNAMES = {
     "super_r",
 }
 
+_QWERTY_SCANCODE_TO_TOKEN = {
+    0x02: "1",
+    0x03: "2",
+    0x04: "3",
+    0x05: "4",
+    0x06: "5",
+    0x07: "6",
+    0x08: "7",
+    0x09: "8",
+    0x0A: "9",
+    0x0B: "0",
+    0x10: "q",
+    0x11: "w",
+    0x12: "e",
+    0x13: "r",
+    0x14: "t",
+    0x15: "y",
+    0x16: "u",
+    0x17: "i",
+    0x18: "o",
+    0x19: "p",
+    0x1E: "a",
+    0x1F: "s",
+    0x20: "d",
+    0x21: "f",
+    0x22: "g",
+    0x23: "h",
+    0x24: "j",
+    0x25: "k",
+    0x26: "l",
+    0x2C: "z",
+    0x2D: "x",
+    0x2E: "c",
+    0x2F: "v",
+    0x30: "b",
+    0x31: "n",
+    0x32: "m",
+}
+
 _DISPLAY_KEY_NAMES = {
     "right": "RMB",
     "middle": "MMB",
@@ -175,6 +216,15 @@ _DISPLAY_KEY_NAMES_VERBOSE = {
     "x1": "Back mouse button (X1)",
     "x2": "Forward mouse button (X2)",
 }
+
+KEYBOARD_DEMO_ROWS: tuple[tuple[str, ...], ...] = (
+    ("1", "2", "3", "4", "5", "6", "7", "8", "9", "0"),
+    ("q", "w", "e", "r", "t", "y", "u", "i", "o", "p"),
+    ("a", "s", "d", "f", "g", "h", "j", "k", "l"),
+    ("z", "x", "c", "v", "b", "n", "m"),
+)
+
+_TOKEN_TO_QWERTY_SCANCODE = {token: scan for scan, token in _QWERTY_SCANCODE_TO_TOKEN.items()}
 
 
 def _normalize_keyboard_token(value: str) -> str | None:
@@ -205,6 +255,14 @@ def _normalize_mouse_token(value: str) -> str | None:
     if token in {"forward", "xbutton2"}:
         token = "x2"
     return token if token in MOUSE_BUTTONS else None
+
+
+def _display_upper_letter(token: str) -> str:
+    value = str(token or "")
+    upper = value.upper()
+    if len(upper) == 1 and upper.isalpha():
+        return upper
+    return value
 
 
 def _build_binding(
@@ -355,7 +413,7 @@ def binding_to_label(binding: Binding) -> str:
         if token in BASE_DIGIT_TO_SHIFTED_SYMBOL:
             return BASE_DIGIT_TO_SHIFTED_SYMBOL[token]
         if token.isalpha():
-            return token.upper()
+            return _display_upper_letter(token)
 
     parts: list[str] = []
     if ctrl:
@@ -371,15 +429,16 @@ def binding_to_label(binding: Binding) -> str:
     elif shift_symbol_short:
         base = BASE_DIGIT_TO_SHIFTED_SYMBOL[token]
     elif token.isalpha():
-        base = token.lower()
+        base = token.lower() if token.isascii() else token
     else:
         base = token.upper()
 
     if not parts:
         return base
     if source == "keyboard":
-        # Keep combo labels compact on keys by stacking modifiers over the base key.
-        combo_base = token.upper() if token.isalpha() else base
+        combo_base = base
+        if shift and token.isalpha():
+            combo_base = _display_upper_letter(token)
         return f"{'/'.join(parts)}\n+\n{combo_base}"
     return "+".join(parts + [base])
 
@@ -391,15 +450,15 @@ def binding_to_inline_label(binding: Binding) -> str:
             return BASE_DIGIT_TO_SHIFTED_SYMBOL[token]
         if token.isalpha():
             if not ctrl and not shift and not alt:
-                return token.lower()
-            base = token.upper()
+                return token.lower() if token.isascii() else token
+            base = _display_upper_letter(token) if shift else (token.upper() if token.isascii() else token)
         else:
             base = token.upper()
     else:
         base = _DISPLAY_KEY_NAMES_VERBOSE.get(token, token.upper())
 
     if source == "keyboard" and shift and not ctrl and not alt and token.isalpha():
-        return base
+        return _display_upper_letter(token)
 
     modifiers: list[str] = []
     if ctrl:
@@ -460,4 +519,170 @@ def normalize_key_event(text: str, key_name: str, shift: bool, ctrl: bool, alt: 
         shift=bool(effective_shift),
         alt=bool(alt),
     )
+
+
+def normalize_key_event_qwerty_scancode(
+    native_scan_code: int,
+    *,
+    shift: bool,
+    ctrl: bool,
+    alt: bool = False,
+) -> Binding | None:
+    if sys.platform != "win32":
+        return None
+    scan = int(native_scan_code) & 0xFF
+    token = _QWERTY_SCANCODE_TO_TOKEN.get(scan)
+    if token is None:
+        return None
+    return _build_binding(
+        "keyboard",
+        token,
+        ctrl=bool(ctrl),
+        shift=bool(shift),
+        alt=bool(alt),
+    )
+
+
+def normalize_key_event_layout_scancode(
+    native_scan_code: int,
+    *,
+    shift: bool,
+    ctrl: bool,
+    alt: bool = False,
+) -> Binding | None:
+    if sys.platform != "win32":
+        return None
+    scan = int(native_scan_code) & 0xFF
+    qwerty_token = _QWERTY_SCANCODE_TO_TOKEN.get(scan)
+    if qwerty_token is None:
+        return None
+    localized = _localized_label_for_scancode(scan, fallback=qwerty_token)
+    layout_token = _normalize_layout_token_for_remap(localized) or qwerty_token
+    return _build_binding(
+        "keyboard",
+        layout_token,
+        ctrl=bool(ctrl),
+        shift=bool(shift),
+        alt=bool(alt),
+    )
+
+
+def remap_bindings_for_keyboard_mode(
+    bindings: dict[int, Binding],
+    target_mode: KeyboardInputMode,
+) -> dict[int, Binding]:
+    target = "qwerty" if str(target_mode or "").strip().lower() == "qwerty" else "layout"
+    qwerty_to_layout, layout_to_qwerty = _keyboard_mode_token_maps()
+    remapped: dict[int, Binding] = {}
+    for note, binding in bindings.items():
+        source, token, ctrl, shift, alt = binding
+        if source != "keyboard":
+            remapped[note] = binding
+            continue
+        if target == "layout":
+            mapped_token = qwerty_to_layout.get(token, token)
+        else:
+            mapped_token = layout_to_qwerty.get(token, token)
+        normalized_token = _normalize_keyboard_token(mapped_token) or token
+        normalized_binding = _build_binding(
+            "keyboard",
+            normalized_token,
+            ctrl=bool(ctrl),
+            shift=bool(shift),
+            alt=bool(alt),
+        )
+        remapped[note] = normalized_binding if normalized_binding is not None else binding
+    return remapped
+
+
+def qwerty_demo_rows() -> tuple[tuple[str, ...], ...]:
+    return KEYBOARD_DEMO_ROWS
+
+
+def current_layout_demo_rows() -> tuple[tuple[str, ...], ...]:
+    rows: list[tuple[str, ...]] = []
+    for row in KEYBOARD_DEMO_ROWS:
+        localized: list[str] = []
+        for token in row:
+            scan = _TOKEN_TO_QWERTY_SCANCODE.get(token)
+            if scan is None:
+                localized.append(token)
+                continue
+            localized.append(_localized_label_for_scancode(scan, fallback=token))
+        rows.append(tuple(localized))
+    return tuple(rows)
+
+
+def _keyboard_mode_token_maps() -> tuple[dict[str, str], dict[str, str]]:
+    qwerty_to_layout: dict[str, str] = {}
+    layout_to_qwerty: dict[str, str] = {}
+    for scan, qwerty_token in _QWERTY_SCANCODE_TO_TOKEN.items():
+        localized = _localized_label_for_scancode(scan, fallback=qwerty_token)
+        layout_token = _normalize_layout_token_for_remap(localized) or qwerty_token
+        qwerty_to_layout[qwerty_token] = layout_token
+        if layout_token not in layout_to_qwerty:
+            layout_to_qwerty[layout_token] = qwerty_token
+    return qwerty_to_layout, layout_to_qwerty
+
+
+def _normalize_layout_token_for_remap(value: str) -> str | None:
+    text = str(value or "").strip()
+    if len(text) != 1:
+        return None
+    token = text.lower()
+    if token.isalnum():
+        return token
+    return None
+
+
+def _localized_label_for_scancode(scan_code: int, *, fallback: str) -> str:
+    scan = int(scan_code) & 0xFF
+    fallback_text = str(fallback or "").strip() or "?"
+    if scan <= 0:
+        return fallback_text
+    if not (sys.platform == "win32"):
+        return fallback_text
+    try:
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        map_vk = user32.MapVirtualKeyExW
+        map_vk.argtypes = [ctypes.c_uint, ctypes.c_uint, ctypes.c_void_p]
+        map_vk.restype = ctypes.c_uint
+        to_unicode = user32.ToUnicodeEx
+        to_unicode.argtypes = [
+            ctypes.c_uint,
+            ctypes.c_uint,
+            ctypes.POINTER(ctypes.c_ubyte),
+            ctypes.c_wchar_p,
+            ctypes.c_int,
+            ctypes.c_uint,
+            ctypes.c_void_p,
+        ]
+        to_unicode.restype = ctypes.c_int
+        get_layout = user32.GetKeyboardLayout
+        get_layout.argtypes = [ctypes.c_uint]
+        get_layout.restype = ctypes.c_void_p
+
+        hkl = get_layout(0)
+        # MAPVK_VSC_TO_VK_EX = 3
+        vk = int(map_vk(scan, 3, hkl))
+        if vk <= 0:
+            return fallback_text
+
+        state = (ctypes.c_ubyte * 256)()
+        buf = ctypes.create_unicode_buffer(8)
+        written = int(to_unicode(vk, scan, state, buf, len(buf), 0, hkl))
+        if written <= 0:
+            return fallback_text
+        text = str(buf.value[:written]).strip()
+        if not text:
+            return fallback_text
+        if len(text) > 1:
+            text = text[0]
+        if text.isalpha():
+            return text.lower()
+        return text
+    except Exception:
+        return fallback_text
 

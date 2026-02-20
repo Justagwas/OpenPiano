@@ -1,4 +1,4 @@
-﻿---
+---
 name: Bug report
 about: Report a problem in OpenPiano
 title: "[Bug]: "

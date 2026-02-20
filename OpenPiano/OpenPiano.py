@@ -47,7 +47,7 @@ class SingleInstanceGuard:
         try:
             ctypes.windll.kernel32.CloseHandle(self._handle)
         except Exception:
-            pass
+            pass      
         self._handle = None
 
 

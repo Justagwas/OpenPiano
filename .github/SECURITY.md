@@ -1,4 +1,4 @@
-﻿# Security Policy
+# Security Policy
 
 Thank you for helping keep OpenPiano secure.
 

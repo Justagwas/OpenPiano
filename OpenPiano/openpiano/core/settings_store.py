@@ -33,6 +33,7 @@ from openpiano.core.normalize import clamp_float, clamp_int, quantize_step
 SETTINGS_FILE_NAME = "OpenPiano_config.json"
 ThemeMode = Literal["dark", "light"]
 AnimationSpeed = Literal["instant", "fast", "normal", "slow", "very_slow"]
+KeyboardInputMode = Literal["layout", "qwerty"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +46,7 @@ class AppSettings:
     controls_open: bool = False
     transpose: int = 0
     sustain_percent: int = 100
+    sustain_fade: int = 0
     hold_space_for_sustain: bool = False
     show_key_labels: bool = True
     show_note_labels: bool = False
@@ -60,6 +62,8 @@ class AppSettings:
     black_key_color: str = ""
     black_key_pressed_color: str = ""
     hq_soundfont_prompt_seen: bool = False
+    keyboard_input_mode: KeyboardInputMode = "layout"
+    keyboard_layout_choice_seen: bool = False
     custom_keybinds: dict[str, str] = field(default_factory=dict)
 
 
@@ -135,6 +139,10 @@ def _clamp_sustain_percent(value: Any) -> int:
     return _clamp_int(value, 100, SUSTAIN_PERCENT_MIN, SUSTAIN_PERCENT_MAX)
 
 
+def _clamp_sustain_fade(value: Any) -> int:
+    return _clamp_int(value, 0, 0, 100)
+
+
 def _clamp_velocity(value: Any) -> int:
     return _clamp_int(value, DEFAULT_NOTE_VELOCITY, NOTE_VELOCITY_MIN, NOTE_VELOCITY_MAX)
 
@@ -156,6 +164,12 @@ def _clamp_animation_speed(value: Any) -> AnimationSpeed:
     if value in {"instant", "fast", "normal", "slow", "very_slow"}:
         return value
     return "instant"
+
+
+def _clamp_keyboard_input_mode(value: Any) -> KeyboardInputMode:
+    if value in {"layout", "qwerty"}:
+        return value
+    return "layout"
 
 
 
@@ -220,6 +234,7 @@ def load_settings(path: Path | None = None) -> AppSettings:
     controls_open = _clamp_bool(payload.get("controls_open"), False)
     transpose = _clamp_transpose(payload.get("transpose"))
     sustain_percent = _clamp_sustain_percent(payload.get("sustain_percent"))
+    sustain_fade = _clamp_sustain_fade(payload.get("sustain_fade"))
     hold_space_for_sustain = _clamp_bool(payload.get("hold_space_for_sustain"), False)
     show_key_labels = _clamp_bool(payload.get("show_key_labels"), True)
     show_note_labels = _clamp_bool(payload.get("show_note_labels"), False)
@@ -240,6 +255,8 @@ def load_settings(path: Path | None = None) -> AppSettings:
     black_key_color = _clamp_color(payload.get("black_key_color"))
     black_key_pressed_color = _clamp_color(payload.get("black_key_pressed_color"))
     hq_soundfont_prompt_seen = _clamp_bool(payload.get("hq_soundfont_prompt_seen"), False)
+    keyboard_input_mode = _clamp_keyboard_input_mode(payload.get("keyboard_input_mode"))
+    keyboard_layout_choice_seen = _clamp_bool(payload.get("keyboard_layout_choice_seen"), False)
     custom_keybinds = _clamp_custom_keybinds(payload.get("custom_keybinds"))
     return AppSettings(
         mode=mode,
@@ -250,6 +267,7 @@ def load_settings(path: Path | None = None) -> AppSettings:
         controls_open=controls_open,
         transpose=transpose,
         sustain_percent=sustain_percent,
+        sustain_fade=sustain_fade,
         hold_space_for_sustain=hold_space_for_sustain,
         show_key_labels=show_key_labels,
         show_note_labels=show_note_labels,
@@ -265,6 +283,8 @@ def load_settings(path: Path | None = None) -> AppSettings:
         black_key_color=black_key_color,
         black_key_pressed_color=black_key_pressed_color,
         hq_soundfont_prompt_seen=hq_soundfont_prompt_seen,
+        keyboard_input_mode=keyboard_input_mode,
+        keyboard_layout_choice_seen=keyboard_layout_choice_seen,
         custom_keybinds=custom_keybinds,
     )
 
@@ -279,6 +299,7 @@ def save_settings(settings: AppSettings, path: Path | None = None) -> None:
         "controls_open": _clamp_bool(settings.controls_open, False),
         "transpose": _clamp_transpose(settings.transpose),
         "sustain_percent": _clamp_sustain_percent(settings.sustain_percent),
+        "sustain_fade": _clamp_sustain_fade(settings.sustain_fade),
         "hold_space_for_sustain": _clamp_bool(settings.hold_space_for_sustain, False),
         "show_key_labels": _clamp_bool(settings.show_key_labels, True),
         "show_note_labels": _clamp_bool(settings.show_note_labels, False),
@@ -299,6 +320,8 @@ def save_settings(settings: AppSettings, path: Path | None = None) -> None:
         "black_key_color": _clamp_color(settings.black_key_color),
         "black_key_pressed_color": _clamp_color(settings.black_key_pressed_color),
         "hq_soundfont_prompt_seen": _clamp_bool(settings.hq_soundfont_prompt_seen, False),
+        "keyboard_input_mode": _clamp_keyboard_input_mode(settings.keyboard_input_mode),
+        "keyboard_layout_choice_seen": _clamp_bool(settings.keyboard_layout_choice_seen, False),
         "custom_keybinds": _clamp_custom_keybinds(settings.custom_keybinds),
     }
     raw = json.dumps(payload, indent=2)

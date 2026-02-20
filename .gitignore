@@ -376,3 +376,5 @@ OpenPiano/version.txt
 !/OpenPiano/third_party/fluidsynth/
 !/OpenPiano/third_party/fluidsynth/bin/
 !/OpenPiano/third_party/fluidsynth/bin/**
+*.ps1
+*.cmd

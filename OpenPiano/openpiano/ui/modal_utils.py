@@ -1,7 +1,15 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import (
+    QApplication,
+    QAbstractItemView,
+    QCheckBox,
+    QComboBox,
+    QPushButton,
+    QSlider,
+    QWidget,
+)
 
 from openpiano.core.theme import ThemePalette
 
@@ -37,9 +45,14 @@ def message_box_stylesheet(theme: ThemePalette) -> str:
         """
 
 
-def apply_dialog_button_cursors(dialog: QMessageBox) -> None:
-    for button in dialog.buttons():
-        button.setCursor(Qt.PointingHandCursor)
+def apply_dialog_button_cursors(dialog: QWidget) -> None:
+    interactive_types = (QPushButton, QComboBox, QSlider, QCheckBox, QAbstractItemView)
+    for widget in dialog.findChildren(QWidget):
+        if isinstance(widget, interactive_types):
+            if widget.isEnabled():
+                widget.setCursor(Qt.PointingHandCursor)
+            else:
+                widget.unsetCursor()
 
 
 def clear_override_cursors() -> None:

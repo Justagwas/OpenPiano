@@ -1,4 +1,4 @@
-﻿# Contributing to OpenPiano
+# Contributing to OpenPiano
 
 Thanks for your interest in contributing to OpenPiano.
 

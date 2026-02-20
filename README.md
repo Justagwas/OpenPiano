@@ -1,4 +1,4 @@
-﻿# OpenPiano
+# OpenPiano
 
 <div align="center">
 
@@ -29,16 +29,12 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/github/v/tag/Justagwas/OpenPiano.svg?label=Version)](
-https://github.com/Justagwas/OpenPiano/tags)
-[![Last Commit](https://img.shields.io/github/last-commit/Justagwas/OpenPiano/main.svg?style=flat&cacheSeconds=3600)](
-https://github.com/Justagwas/OpenPiano/commits/main)
-[![Stars](https://img.shields.io/github/stars/Justagwas/OpenPiano.svg?style=flat&cacheSeconds=3600)](
-https://github.com/Justagwas/OpenPiano/stargazers)
-[![Open Issues](https://img.shields.io/github/issues/Justagwas/OpenPiano.svg)](
-https://github.com/Justagwas/OpenPiano/issues)
-[![License](https://img.shields.io/github/license/Justagwas/OpenPiano.svg)](
-https://github.com/Justagwas/OpenPiano/blob/main/LICENSE)
+[![Version](https://img.shields.io/github/v/tag/Justagwas/openpiano.svg?label=Version)](https://github.com/Justagwas/openpiano/tags)
+[![License](https://img.shields.io/github/license/Justagwas/openpiano.svg)](https://github.com/Justagwas/openpiano/blob/main/LICENSE)
+[![Last Commit](https://img.shields.io/github/last-commit/Justagwas/openpiano/main.svg?style=flat&cacheSeconds=3600)](https://github.com/Justagwas/openpiano/commits/main)
+[![Open Issues](https://img.shields.io/github/issues/Justagwas/openpiano.svg)](https://github.com/Justagwas/openpiano/issues)
+[![Stars](https://img.shields.io/github/stars/Justagwas/openpiano.svg?style=flat&cacheSeconds=3600)](https://github.com/Justagwas/openpiano/stargazers)
+![Installs (7d)](https://img.shields.io/badge/dynamic/json?style=flat&url=https%3A%2F%2Fdownload-stats-worker.justagwas.workers.dev%2Fdownloads%2Fopenpiano%3Frange%3Dweek&query=%24.data.weekly.all&label=Installs%20(7d))
 
 </div>
 
