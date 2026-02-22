@@ -1,5 +1,20 @@
-#Check out my other projects! https://justagwas.com/projects
-#The OFFICIAL Repo - https://github.com/Justagwas/openpiano
+"""
+OpenPiano - Virtual Piano for Windows
+
+Copyright 2026 Justagwas
+
+This program is licensed under the GNU General Public License v3.0
+See the LICENSE file in the project root for the full license text.
+
+Official Project Page:
+https://justagwas.com/projects/openpiano
+
+Official Source Code:
+https://github.com/justagwas/openpiano
+https://sourceforge.net/projects/openpiano
+
+SPDX-License-Identifier: GPL-3.0-or-later
+"""
 from __future__ import annotations
 
 import ctypes
