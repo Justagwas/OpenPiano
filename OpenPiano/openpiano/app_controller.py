@@ -84,8 +84,8 @@ AudioFactory = Callable[[], AudioEngineProtocol]
 InstrumentProvider = Callable[[], list[InstrumentInfo]]
 MidiManagerFactory = Callable[[Callable[[int, int], None], Callable[[int], None]], MidiInputManager]
 RecorderFactory = Callable[[], MidiRecorder]
-HQ_SOUNDFONT_URL = "https://downloads.justagwas.com/openpiano/GRAND%20PIANO.sf2"
-HQ_SOUNDFONT_FILENAME = "GRAND PIANO.sf2"
+HQ_SOUNDFONT_URL = "https://downloads.justagwas.com/openpiano/GRAND%20PIANO.sf3"
+HQ_SOUNDFONT_FILENAME = "GRAND PIANO.sf3"
 HQ_SOUNDFONT_DOWNLOAD_TIMEOUT_SECONDS = 30.0
 HQ_SOUNDFONT_DOWNLOAD_RETRIES = 3
 HQ_SOUNDFONT_DOWNLOAD_RETRY_DELAY_SECONDS = 0.6
@@ -190,6 +190,7 @@ class PianoAppController(QObject):
         self._instruments: list[InstrumentInfo] = []
         self._instrument_by_id: dict[str, InstrumentInfo] = {}
         self._available_programs: dict[int, list[int]] = {}
+        self._available_program_names: dict[int, dict[int, str]] = {}
         self._tutorial_active = False
         self._tutorial_steps: list[TutorialStep] = []
         self._tutorial_index = 0
@@ -535,7 +536,8 @@ class PianoAppController(QObject):
         if not self._instruments:
             self._instrument_id = ""
             self._available_programs = {}
-            self.window.set_bank_preset_options([], [], 0, 0)
+            self._available_program_names = {}
+            self._set_bank_preset_options([], [], 0, 0)
             return
 
         if self._instrument_id and self._instrument_id in self._instrument_by_id:
@@ -551,7 +553,8 @@ class PianoAppController(QObject):
         if fallback is None:
             self._instrument_id = ""
             self._available_programs = {}
-            self.window.set_bank_preset_options([], [], 0, 0)
+            self._available_program_names = {}
+            self._set_bank_preset_options([], [], 0, 0)
             return
         self._apply_instrument_selection(
             fallback.id,
@@ -565,7 +568,7 @@ class PianoAppController(QObject):
         selected_bank = self._instrument_bank
         selected_preset = self._instrument_preset
         if not banks:
-            self.window.set_bank_preset_options([], [], selected_bank, selected_preset)
+            self._set_bank_preset_options([], [], selected_bank, selected_preset)
             return
         if selected_bank not in self._available_programs:
             selected_bank = banks[0]
@@ -574,7 +577,66 @@ class PianoAppController(QObject):
             selected_preset = presets[0]
         self._instrument_bank = selected_bank
         self._instrument_preset = selected_preset
-        self.window.set_bank_preset_options(banks, presets, selected_bank, selected_preset)
+        preset_names = self._available_program_names.get(selected_bank, {})
+        self._set_bank_preset_options(banks, presets, selected_bank, selected_preset, preset_names=preset_names)
+
+    def _set_bank_preset_options(
+        self,
+        banks: list[int],
+        presets: list[int],
+        selected_bank: int,
+        selected_preset: int,
+        *,
+        preset_names: dict[int, str] | None = None,
+    ) -> None:
+        try:
+            self.window.set_bank_preset_options(
+                banks,
+                presets,
+                selected_bank,
+                selected_preset,
+                preset_names=preset_names or {},
+            )
+        except TypeError:
+            self.window.set_bank_preset_options(banks, presets, selected_bank, selected_preset)
+
+    @staticmethod
+    def _normalize_program_name_map(
+        raw_names: object,
+        programs: dict[int, list[int]],
+    ) -> dict[int, dict[int, str]]:
+        if not isinstance(raw_names, dict):
+            return {}
+        normalized: dict[int, dict[int, str]] = {}
+        for bank, presets in programs.items():
+            bank_key = int(bank)
+            bank_names = raw_names.get(bank_key)
+            if bank_names is None:
+                bank_names = raw_names.get(str(bank_key))
+            if not isinstance(bank_names, dict):
+                continue
+            for preset in presets:
+                preset_key = int(preset)
+                value = bank_names.get(preset_key)
+                if value is None:
+                    value = bank_names.get(str(preset_key))
+                if not isinstance(value, str):
+                    continue
+                label = " ".join(value.split()).strip()
+                if not label:
+                    continue
+                normalized.setdefault(bank_key, {})[preset_key] = label
+        return normalized
+
+    def _read_available_program_names(self, programs: dict[int, list[int]]) -> dict[int, dict[int, str]]:
+        getter = getattr(self.audio_engine, "get_available_program_names", None)
+        if not callable(getter):
+            return {}
+        try:
+            raw_names = getter()
+        except Exception:
+            return {}
+        return self._normalize_program_name_map(raw_names, programs)
 
     def _apply_instrument_selection(
         self,
@@ -606,6 +668,7 @@ class PianoAppController(QObject):
         self._instrument_bank = normalized_bank
         self._instrument_preset = normalized_preset
         self._available_programs = normalize_available_programs(programs)
+        self._available_program_names = self._read_available_program_names(self._available_programs)
         self.window.set_instruments(self._instruments, self._instrument_id)
         self._refresh_program_controls()
         if persist:
@@ -1222,7 +1285,7 @@ class PianoAppController(QObject):
 
         response = self.window.ask_yes_no(
             "Grand Piano SoundFont",
-            "Download high quality grand piano SoundFont (~30 MB)?\n\n"
+            "Download high quality grand piano SoundFont (~8 MB)?\n\n"
             "This soundfont will be stored in your user soundfonts folder.",
             default_yes=True,
         )
@@ -1310,7 +1373,8 @@ class PianoAppController(QObject):
         else:
             self._instrument_id = ""
             self._available_programs = {}
-            self.window.set_bank_preset_options([], [], 0, 0)
+            self._available_program_names = {}
+            self._set_bank_preset_options([], [], 0, 0)
         self._refresh_stats_ui()
         self._schedule_persist()
 

@@ -38,6 +38,9 @@ class AudioEngineProtocol(Protocol):
     def get_available_programs(self) -> dict[int, list[int]]:
         ...
 
+    def get_available_program_names(self) -> dict[int, dict[int, str]]:
+        ...
+
     def get_current_program(self) -> tuple[int, int]:
         ...
 
@@ -71,6 +74,9 @@ class SilentAudioEngine:
         return
 
     def get_available_programs(self) -> dict[int, list[int]]:
+        return {}
+
+    def get_available_program_names(self) -> dict[int, dict[int, str]]:
         return {}
 
     def get_current_program(self) -> tuple[int, int]:
@@ -115,6 +121,7 @@ class FluidSynthAudioEngine:
         self._preset = 0
         self._output_driver = self._default_output_driver()
         self._available_programs: dict[int, list[int]] = {}
+        self._available_program_names: dict[int, dict[int, str]] = {}
         self._active_notes: set[int] = set()
         self._create_synth()
         self._output_driver = self._start_synth(self._output_driver)
@@ -210,7 +217,10 @@ class FluidSynthAudioEngine:
         old_sfid = self._sfid
         try:
             new_sfid = int(self._sfload(str(sf_path)))
-            available_programs = self._discover_available_programs(new_sfid, preferred_bank=target_bank)
+            available_programs, available_program_names = self._discover_available_programs(
+                new_sfid,
+                preferred_bank=target_bank,
+            )
             selected_bank, selected_preset = normalize_program_selection(
                 available_programs,
                 target_bank,
@@ -231,6 +241,7 @@ class FluidSynthAudioEngine:
         self._bank = selected_bank
         self._preset = selected_preset
         self._available_programs = available_programs
+        self._available_program_names = available_program_names
         if old_sfid is not None and old_sfid != new_sfid:
             try:
                 self._sfunload(old_sfid)
@@ -263,6 +274,12 @@ class FluidSynthAudioEngine:
     def get_available_programs(self) -> dict[int, list[int]]:
         return {bank: list(presets) for bank, presets in self._available_programs.items()}
 
+    def get_available_program_names(self) -> dict[int, dict[int, str]]:
+        return {
+            int(bank): {int(preset): str(name) for preset, name in preset_names.items()}
+            for bank, preset_names in self._available_program_names.items()
+        }
+
     def get_current_program(self) -> tuple[int, int]:
         return self._bank, self._preset
 
@@ -290,22 +307,30 @@ class FluidSynthAudioEngine:
         self._active_notes.clear()
         self._sfid = None
         self._available_programs = {}
+        self._available_program_names = {}
 
         if soundfont_path and Path(soundfont_path).exists():
             self.set_instrument(soundfont_path, bank=bank, preset=preset)
         self.set_master_volume(master_volume)
 
-    def _discover_available_programs(self, sfid: int, preferred_bank: int = 0) -> dict[int, list[int]]:
+    def _discover_available_programs(
+        self,
+        sfid: int,
+        preferred_bank: int = 0,
+    ) -> tuple[dict[int, list[int]], dict[int, dict[int, str]]]:
         available: dict[int, list[int]] = {}
+        names: dict[int, dict[int, str]] = {}
         preferred_bank = self._clamp_bank(int(preferred_bank))
         max_bank = max(255, min(16383, preferred_bank + 64))
         empty_bank_run = 0
         found_any = False
 
         for bank in range(0, max_bank + 1):
-            presets = self._discover_bank_presets(sfid, bank)
+            presets, preset_names = self._discover_bank_presets(sfid, bank)
             if presets:
                 available[bank] = presets
+                if preset_names:
+                    names[bank] = preset_names
                 found_any = True
                 empty_bank_run = 0
             else:
@@ -314,28 +339,49 @@ class FluidSynthAudioEngine:
                 break
 
         if preferred_bank not in available:
-            preferred_presets = self._discover_bank_presets(sfid, preferred_bank)
+            preferred_presets, preferred_names = self._discover_bank_presets(sfid, preferred_bank)
             if preferred_presets:
                 available[preferred_bank] = preferred_presets
+                if preferred_names:
+                    names[preferred_bank] = preferred_names
 
-        return {bank: sorted(set(presets)) for bank, presets in available.items() if presets}
+        normalized_programs: dict[int, list[int]] = {}
+        normalized_names: dict[int, dict[int, str]] = {}
+        for bank, presets in available.items():
+            deduped_presets = sorted(set(presets))
+            if not deduped_presets:
+                continue
+            normalized_programs[bank] = deduped_presets
+            bank_names = names.get(bank, {})
+            if not bank_names:
+                continue
+            filtered_names = {
+                int(preset): str(name)
+                for preset, name in bank_names.items()
+                if int(preset) in deduped_presets and str(name).strip()
+            }
+            if filtered_names:
+                normalized_names[bank] = filtered_names
+        return normalized_programs, normalized_names
 
-    def _discover_bank_presets(self, sfid: int, bank: int) -> list[int]:
+    def _discover_bank_presets(self, sfid: int, bank: int) -> tuple[list[int], dict[int, str]]:
         presets: list[int] = []
+        names: dict[int, str] = {}
         sfpreset_name = getattr(self._synth, "sfpreset_name", None)
         if callable(sfpreset_name):
             for preset in range(128):
                 name = self._safe_sfpreset_name(sfid, bank, preset)
                 if name:
                     presets.append(preset)
-            return presets
+                    names[preset] = name
+            return presets, names
 
         program_select = getattr(self._synth, "program_select", None)
         if callable(program_select):
             for preset in range(128):
                 if self._safe_program_exists(sfid, bank, preset):
                     presets.append(preset)
-        return presets
+        return presets, names
 
     def _safe_sfpreset_name(self, sfid: int, bank: int, preset: int) -> str | None:
         try:
@@ -398,6 +444,7 @@ class FluidSynthAudioEngine:
                 self._sfid = None
             self._soundfont_path = None
             self._available_programs = {}
+            self._available_program_names = {}
         except Exception:
             pass
         try:

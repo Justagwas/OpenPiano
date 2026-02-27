@@ -2132,6 +2132,7 @@ class MainWindow(QMainWindow):
         presets: list[int],
         selected_bank: int,
         selected_preset: int,
+        preset_names: dict[int, str] | None = None,
     ) -> None:
         bank_options = [(str(bank), int(bank)) for bank in banks]
         self._populate_combo(
@@ -2141,7 +2142,16 @@ class MainWindow(QMainWindow):
             default_index=0,
         )
 
-        preset_options = [(str(preset), int(preset)) for preset in presets]
+        labels = preset_names or {}
+        preset_options: list[tuple[str, int]] = []
+        for preset in presets:
+            preset_value = int(preset)
+            preset_name = str(labels.get(preset_value, "")).strip()
+            if preset_name:
+                label = f"{preset_value} - {preset_name}"
+            else:
+                label = str(preset_value)
+            preset_options.append((label, preset_value))
         self._populate_combo(
             self.preset_combo,
             preset_options,

@@ -114,9 +114,8 @@ def _source_roots() -> list[tuple[InstrumentSource, Path]]:
 def _is_default_builtin(item: InstrumentInfo) -> bool:
     if item.source != "builtin":
         return False
-    name = item.path.name.lower()
     stem = item.path.stem.lower()
-    return name == "default.sf2" or stem == "default"
+    return stem == "default"
 
 
 def _normalize_builtin_name(value: str) -> str:
@@ -134,12 +133,21 @@ def _is_grand_piano_builtin(item: InstrumentInfo) -> bool:
     return _is_grand_piano(item)
 
 
-def _builtin_priority(item: InstrumentInfo) -> int:
+def _pinned_soundfont_priority(item: InstrumentInfo) -> int:
+    suffix = item.path.suffix.lower()
     if _is_default_builtin(item):
-        return 0
+        if suffix == ".sf3":
+            return 0
+        if suffix == ".sf2":
+            return 2
+        return 4
     if _is_grand_piano(item):
-        return 1
-    return 2
+        if suffix == ".sf3":
+            return 1
+        if suffix == ".sf2":
+            return 3
+        return 5
+    return 6
 
 
 def discover_instruments() -> list[InstrumentInfo]:
@@ -169,7 +177,7 @@ def discover_instruments() -> list[InstrumentInfo]:
 
     instruments.sort(
         key=lambda item: (
-            _builtin_priority(item),
+            _pinned_soundfont_priority(item),
             SOURCE_ORDER[item.source],
             item.name.lower(),
             item.path.name.lower(),
