@@ -34,6 +34,7 @@ SETTINGS_FILE_NAME = "OpenPiano_config.json"
 ThemeMode = Literal["dark", "light"]
 AnimationSpeed = Literal["instant", "fast", "normal", "slow", "very_slow"]
 KeyboardInputMode = Literal["layout", "qwerty"]
+NoteNameStyle = Literal["alpha", "syllab"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +51,7 @@ class AppSettings:
     hold_space_for_sustain: bool = False
     show_key_labels: bool = True
     show_note_labels: bool = False
+    note_name_style: NoteNameStyle = "alpha"
     instrument_bank: int = 0
     instrument_preset: int = 0
     theme_mode: ThemeMode = DEFAULT_THEME_MODE
@@ -172,6 +174,12 @@ def _clamp_keyboard_input_mode(value: Any) -> KeyboardInputMode:
     return "layout"
 
 
+def _clamp_note_name_style(value: Any) -> NoteNameStyle:
+    if value in {"alpha", "syllab"}:
+        return value
+    return "alpha"
+
+
 
 
 def _clamp_midi_device_name(value: Any) -> str:
@@ -238,6 +246,7 @@ def load_settings(path: Path | None = None) -> AppSettings:
     hold_space_for_sustain = _clamp_bool(payload.get("hold_space_for_sustain"), False)
     show_key_labels = _clamp_bool(payload.get("show_key_labels"), True)
     show_note_labels = _clamp_bool(payload.get("show_note_labels"), False)
+    note_name_style = _clamp_note_name_style(payload.get("note_name_style"))
     instrument_bank = _clamp_int(payload.get("instrument_bank"), 0, INSTRUMENT_BANK_MIN, INSTRUMENT_BANK_MAX)
     instrument_preset = _clamp_int(
         payload.get("instrument_preset"),
@@ -271,6 +280,7 @@ def load_settings(path: Path | None = None) -> AppSettings:
         hold_space_for_sustain=hold_space_for_sustain,
         show_key_labels=show_key_labels,
         show_note_labels=show_note_labels,
+        note_name_style=note_name_style,
         instrument_bank=instrument_bank,
         instrument_preset=instrument_preset,
         theme_mode=theme_mode,
@@ -303,6 +313,7 @@ def save_settings(settings: AppSettings, path: Path | None = None) -> None:
         "hold_space_for_sustain": _clamp_bool(settings.hold_space_for_sustain, False),
         "show_key_labels": _clamp_bool(settings.show_key_labels, True),
         "show_note_labels": _clamp_bool(settings.show_note_labels, False),
+        "note_name_style": _clamp_note_name_style(settings.note_name_style),
         "instrument_bank": _clamp_int(settings.instrument_bank, 0, INSTRUMENT_BANK_MIN, INSTRUMENT_BANK_MAX),
         "instrument_preset": _clamp_int(
             settings.instrument_preset,

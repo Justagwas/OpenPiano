@@ -154,6 +154,10 @@ class PianoWidget(QWidget):
         self._selected_keybind_note = selected
         self.update()
 
+    def set_note_labels(self, labels: dict[int, str]) -> None:
+        self._labels = dict(labels)
+        self.update()
+
     def set_label_visibility(self, show_key_labels: bool, show_note_labels: bool) -> None:
         self._show_key_labels = bool(show_key_labels)
         self._show_note_labels = bool(show_note_labels)

@@ -59,6 +59,11 @@ if TYPE_CHECKING:
     from openpiano.core.keymap import PianoMode
 
 
+NOTE_NAME_STYLE_LABELS = {
+    "alpha": "Alphabetic",
+    "syllab": "Syllabic",
+}
+
 ANIMATION_SPEED_LABELS = {
     "instant": "Instant",
     "fast": "Fast",
@@ -84,6 +89,7 @@ class MainWindow(QMainWindow):
     holdSpaceSustainChanged = Signal(bool)
     showKeyLabelsChanged = Signal(bool)
     showNoteLabelsChanged = Signal(bool)
+    noteNameStyleChanged = Signal(str)
     changeKeybindsRequested = Signal()
     changeKeyboardLayoutRequested = Signal()
     doneKeybindsRequested = Signal()
@@ -340,6 +346,12 @@ class MainWindow(QMainWindow):
         self.show_note_labels_checkbox.setChecked(False)
         self.show_note_labels_checkbox.toggled.connect(self.showNoteLabelsChanged.emit)
         note_label_row.addWidget(self.show_note_labels_checkbox)
+        self.note_name_style_combo = ChevronComboBox(self.keyboard_card)
+        self.note_name_style_combo.setObjectName("animCombo")
+        for style, label in NOTE_NAME_STYLE_LABELS.items():
+            self.note_name_style_combo.addItem(label, userData=style)
+        self.note_name_style_combo.currentIndexChanged.connect(self._on_note_name_style_index_changed)
+        note_label_row.addWidget(self.note_name_style_combo)
         note_label_row.addStretch(1)
         keyboard_layout.addLayout(note_label_row)
 
@@ -1503,6 +1515,13 @@ class MainWindow(QMainWindow):
         self._applied_ui_scale = scale
         self.uiScaleChanged.emit(scale)
 
+    def _on_note_name_style_index_changed(self, index: int) -> None:
+        if index < 0:
+            return
+        style = self.note_name_style_combo.itemData(index, role=Qt.UserRole)
+        if isinstance(style, str):
+            self.noteNameStyleChanged.emit(style)
+
     def _on_anim_index_changed(self, index: int) -> None:
         if index < 0:
             return
@@ -2228,6 +2247,15 @@ class MainWindow(QMainWindow):
         self.show_note_labels_checkbox.setChecked(bool(show_note_labels))
         self.show_key_labels_checkbox.blockSignals(False)
         self.show_note_labels_checkbox.blockSignals(False)
+
+    def set_note_name_style(self, style: str) -> None:
+        target = style if style in NOTE_NAME_STYLE_LABELS else "alpha"
+        self.note_name_style_combo.blockSignals(True)
+        for idx in range(self.note_name_style_combo.count()):
+            if self.note_name_style_combo.itemData(idx, role=Qt.UserRole) == target:
+                self.note_name_style_combo.setCurrentIndex(idx)
+                break
+        self.note_name_style_combo.blockSignals(False)
 
     def set_keybind_edit_mode(self, active: bool, status_text: str = "") -> None:
         self._keybind_edit_active = bool(active)

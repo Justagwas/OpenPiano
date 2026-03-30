@@ -9,6 +9,7 @@ Binding: TypeAlias = tuple[BindingSource, str, bool, bool, bool]
 BindingSpec: TypeAlias = str | tuple[str, str]
 PianoMode: TypeAlias = Literal["61", "88"]
 KeyboardInputMode: TypeAlias = Literal["layout", "qwerty"]
+NoteNameStyle: TypeAlias = Literal["alpha", "syllab"]
 
 MIDI_START_61 = 36
 MIDI_END_61 = 96
@@ -111,7 +112,9 @@ MODE_RANGES: dict[PianoMode, tuple[int, int]] = {
     "88": (MIDI_START_88, MIDI_END_88),
 }
 
-NOTE_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
+ALPHA_NOTE_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
+SYLLAB_NOTE_NAMES = ("Do", "Do#", "Re", "Re#", "Mi", "Fa", "Fa#", "Sol", "Sol#", "La", "La#", "Si")
+OCTAVE_INDEXES = ("⁻¹", "⁰", "¹", "²", "³", "⁴", "⁵", "⁶", "⁷", "⁸", "⁹", "¹⁰", "¹¹")
 BLACK_NOTES = {1, 3, 6, 8, 10}
 
 SHIFTED_DIGIT_SYMBOLS = {
@@ -398,9 +401,10 @@ def get_mode_mapping(mode: PianoMode) -> dict[int, Binding]:
     midi_start, midi_end = MODE_RANGES[mode]
     return {note: _binding_spec_to_binding(_MIDI_TO_BINDING_SPEC_88[note]) for note in range(midi_start, midi_end + 1)}
 
-def get_note_labels(mode: PianoMode) -> dict[int, str]:
+def get_note_labels(mode: PianoMode, style: NoteNameStyle = "alpha") -> dict[int, str]:
     midi_start, midi_end = MODE_RANGES[mode]
-    return {note: f"{NOTE_NAMES[note % 12]}{(note // 12) - 1}" for note in range(midi_start, midi_end + 1)}
+    names = ALPHA_NOTE_NAMES if style == "alpha" else SYLLAB_NOTE_NAMES
+    return {note: f"{names[note % 12]}{OCTAVE_INDEXES[(note // 12) - 1]}" for note in range(midi_start, midi_end + 1)}
 
 
 def is_black_key(midi_note: int) -> bool:

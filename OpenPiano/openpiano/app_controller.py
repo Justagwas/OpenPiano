@@ -48,6 +48,7 @@ from openpiano.core.keymap import (
     extract_custom_keybind_overrides,
     get_mode_mapping,
     get_note_labels,
+    NoteNameStyle,
     normalize_mouse_binding,
     normalize_key_event,
     normalize_key_event_layout_scancode,
@@ -140,6 +141,7 @@ class PianoAppController(QObject):
         self._hold_space_for_sustain = bool(settings.hold_space_for_sustain)
         self._show_key_labels = bool(settings.show_key_labels)
         self._show_note_labels = bool(settings.show_note_labels)
+        self._note_name_style: NoteNameStyle = settings.note_name_style
         self._theme_mode = settings.theme_mode
         self._ui_scale = _round_scale(settings.ui_scale)
         self._animation_speed = (
@@ -303,6 +305,7 @@ class PianoAppController(QObject):
         self.window.holdSpaceSustainChanged.connect(self._on_hold_space_sustain_changed)
         self.window.showKeyLabelsChanged.connect(self._on_show_key_labels_changed)
         self.window.showNoteLabelsChanged.connect(self._on_show_note_labels_changed)
+        self.window.noteNameStyleChanged.connect(self._on_note_name_style_changed)
         self.window.changeKeybindsRequested.connect(self._on_change_keybinds_requested)
         self.window.changeKeyboardLayoutRequested.connect(self._on_change_keyboard_layout_requested)
         self.window.doneKeybindsRequested.connect(self._on_done_keybinds_requested)
@@ -344,6 +347,7 @@ class PianoAppController(QObject):
         self.window.set_sustain_fade(self._sustain_fade)
         self.window.set_hold_space_sustain_mode(self._hold_space_for_sustain)
         self.window.set_label_visibility(self._show_key_labels, self._show_note_labels)
+        self.window.set_note_name_style(self._note_name_style)
         self.window.set_theme_mode(self._theme_mode)
         self.window.set_ui_scale(self._ui_scale)
         self.window.set_animation_speed(self._animation_speed)
@@ -697,7 +701,7 @@ class PianoAppController(QObject):
         mode_min, mode_max = MODE_RANGES[mode]
         self._mapping = {note: full_map[note] for note in range(mode_min, mode_max + 1)}
         self._binding_to_notes = build_binding_to_notes(self._mapping)
-        self._note_labels = get_note_labels(mode)
+        self._note_labels = get_note_labels(mode, self._note_name_style)
         self._keys = sorted(self._mapping.keys())
         self._mode_min, self._mode_max = MODE_RANGES[mode]
 
@@ -814,6 +818,14 @@ class PianoAppController(QObject):
     def _on_show_note_labels_changed(self, enabled: bool) -> None:
         self._show_note_labels = bool(enabled)
         self._sync_piano_label_visibility()
+        self._schedule_persist()
+
+    def _on_note_name_style_changed(self, style: str) -> None:
+        if style not in ("alpha", "syllab"):
+            return
+        self._note_name_style = style  # type: ignore[assignment]
+        self._note_labels = get_note_labels(self._mode, self._note_name_style)
+        self.window.piano_widget.set_note_labels(self._note_labels)
         self._schedule_persist()
 
     def _set_keybind_editor_status(self, text: str = "") -> None:
@@ -1328,6 +1340,7 @@ class PianoAppController(QObject):
         self._hold_space_for_sustain = defaults.hold_space_for_sustain
         self._show_key_labels = defaults.show_key_labels
         self._show_note_labels = defaults.show_note_labels
+        self._note_name_style = defaults.note_name_style
         self._theme_mode = defaults.theme_mode
         self._ui_scale = _round_scale(defaults.ui_scale)
         self._animation_speed = defaults.animation_speed
@@ -2037,6 +2050,7 @@ class PianoAppController(QObject):
             hold_space_for_sustain=self._hold_space_for_sustain,
             show_key_labels=self._show_key_labels,
             show_note_labels=self._show_note_labels,
+            note_name_style=self._note_name_style,
             instrument_bank=self._instrument_bank,
             instrument_preset=self._instrument_preset,
             theme_mode=self._theme_mode,
