@@ -104,6 +104,7 @@ class PianoAppController(QObject):
     _midiNoteOffReady = Signal(int)
     _hqSoundfontDownloadReady = Signal(object)
     _midiDropdownRefreshReady = Signal(object)
+    _recordingSaveReady = Signal(object)
 
     def __init__(
         self,
@@ -182,6 +183,7 @@ class PianoAppController(QObject):
         self._note_sources: dict[int, set[str]] = {}
         self._source_to_sounding_note: dict[str, int] = {}
         self._sustained_notes: dict[int, float | None] = {}
+        self._note_velocities: dict[int, int] = {}
         self._note_lifecycle = NoteLifecycleService(self._note_sources, self._sustained_notes)
         self._current_mouse_base_note: int | None = None
         self._kps_events: deque[float] = deque()
@@ -217,12 +219,14 @@ class PianoAppController(QObject):
         self._midiNoteOffReady.connect(self._on_midi_note_off)
         self._hqSoundfontDownloadReady.connect(self._finish_high_quality_soundfont_download)
         self._midiDropdownRefreshReady.connect(self._finish_midi_dropdown_refresh)
+        self._recordingSaveReady.connect(self._finish_recording_save)
 
         self._midi_manager = self._midi_manager_factory(self._queue_midi_note_on, self._queue_midi_note_off)
         self._midi_routing = MidiRoutingService(self._midi_manager)
         self._hq_soundfont_download_active = False
         self._midi_dropdown_refresh_active = False
         self._recorder = self._recorder_factory()
+        self._recording_save_active = False
         self._recording_started_at = 0.0
         self._recording_elapsed_seconds = 0
         self._update_service = UpdateCheckService(
@@ -1022,10 +1026,14 @@ class PianoAppController(QObject):
         self._restore_midi_input_device(persist=True, show_warning=True)
 
     def _on_recording_toggled(self, active: bool) -> None:
+        if self._recording_save_active:
+            self.window.set_recording_state(active=False, has_take=self._recorder.has_take())
+            return
         if bool(active):
             self._recorder.start()
             self._recording_started_at = time.monotonic()
             self._recording_elapsed_seconds = 0
+            self._record_note_on_for_active_notes()
             self.window.set_recording_state(active=True, has_take=False)
             self.window.set_recording_elapsed(0)
             return
@@ -1040,26 +1048,74 @@ class PianoAppController(QObject):
     def _on_save_recording_requested(self) -> None:
         if self._recorder.is_recording:
             return
+        if self._recording_save_active:
+            self.window.show_info("Recording", "A recording export is already in progress.")
+            return
         if not self._recorder.has_take():
             self.window.show_info("Recording", "No recording available to save.")
             return
-        path_text, _ = QFileDialog.getSaveFileName(
+        path_text, selected_filter = QFileDialog.getSaveFileName(
             self.window,
-            "Save MIDI Recording",
+            "Save Recording",
             str(Path.home() / f"{APP_NAME}_Take.mid"),
-            "MIDI Files (*.mid)",
+            "MIDI / WAV Files (*.mid *.wav);;MIDI Files (*.mid);;WAV Files (*.wav)",
         )
         if not path_text:
             return
+        destination = Path(path_text)
+        if not destination.suffix:
+            filter_text = str(selected_filter or "").lower()
+            destination = destination.with_suffix(".wav" if "wav" in filter_text else ".mid")
+        save_args: dict[str, object] = {}
+        if destination.suffix.lower() == ".wav":
+            instrument = self._instrument_by_id.get(self._instrument_id)
+            if instrument is None or not instrument.path.exists():
+                self.window.show_warning("Recording", "WAV export requires a valid loaded SoundFont.")
+                return
+            save_args = {
+                "soundfont_path": Path(instrument.path),
+                "bank": int(self._instrument_bank),
+                "preset": int(self._instrument_preset),
+                "master_volume": float(self._volume),
+            }
+
+        self._recording_save_active = True
+        self.window.set_recording_save_busy(True)
+        worker = threading.Thread(
+            target=self._recording_save_worker,
+            args=(destination, save_args),
+            daemon=True,
+        )
+        worker.start()
+
+    def _recording_save_worker(self, destination: Path, save_args: dict[str, object]) -> None:
+        result: dict[str, object] = {"ok": False, "error": "", "path": str(destination)}
         try:
-            self._recorder.save_as(Path(path_text))
+            self._recorder.save_as(destination, **save_args)
+            result["ok"] = True
         except Exception as exc:
-            self.window.show_warning(
-                "Recording",
-                f"Could not save recording:\n{exc}",
-            )
+            result["error"] = str(exc)
+        if self._is_shutdown:
             return
-        self.window.show_info("Recording", "Recording saved.")
+        try:
+            self._recordingSaveReady.emit(result)
+        except RuntimeError:
+            return
+
+    def _finish_recording_save(self, result: dict[str, object]) -> None:
+        self._recording_save_active = False
+        if self._is_shutdown:
+            return
+        self.window.set_recording_save_busy(False)
+        self.window.set_recording_state(active=False, has_take=self._recorder.has_take())
+        if bool(result.get("ok")):
+            self.window.show_info("Recording", "Recording saved.")
+            return
+        error = str(result.get("error") or "Unknown error")
+        self.window.show_warning(
+            "Recording",
+            f"Could not save recording:\n{error}",
+        )
 
     def _on_all_notes_off_requested(self) -> None:
         self._stop_all_notes()
@@ -1408,7 +1464,8 @@ class PianoAppController(QObject):
         previous = self._source_to_sounding_note.pop(source, None)
         if previous is not None:
             self._release_note_source(previous, source)
-        sounding = self._apply_transpose(base_note)
+        # Mouse clicks should play the visual key under the cursor directly.
+        sounding = int(base_note)
         self._source_to_sounding_note[source] = sounding
         self._activate_note(sounding, source, velocity=self._velocity)
         self._record_kps_event()
@@ -1826,6 +1883,7 @@ class PianoAppController(QObject):
         return released
 
     def _activate_note(self, note: int, source: str, velocity: int = 100) -> None:
+        self._note_velocities[int(note)] = max(1, min(127, int(velocity)))
         self._note_lifecycle.activate_note(
             note,
             source,
@@ -1847,12 +1905,24 @@ class PianoAppController(QObject):
         )
 
     def _stop_note(self, note: int) -> None:
+        self._note_velocities.pop(int(note), None)
         self._note_lifecycle.stop_note(
             note,
             note_off=self._audio_note_off_safe,
             record_note_off=lambda midi_note, ts: self._recorder.add_note_off(midi_note, timestamp=ts),
             set_pressed=self.window.piano_widget.set_pressed,
         )
+
+    def _record_note_on_for_active_notes(self) -> None:
+        if not self._recorder.is_recording:
+            return
+        notes = set(self._note_sources.keys()) | set(self._sustained_notes.keys())
+        if not notes:
+            return
+        timestamp = time.monotonic()
+        for note in notes:
+            velocity = self._note_velocities.get(int(note), self._velocity)
+            self._recorder.add_note_on(int(note), velocity=max(1, min(127, int(velocity))), timestamp=timestamp)
 
     def _release_all_sustained(self) -> None:
         self._note_lifecycle.release_all_sustained(stop_note=self._stop_note)
@@ -1936,6 +2006,7 @@ class PianoAppController(QObject):
             set_pressed=self.window.piano_widget.set_pressed,
             all_notes_off=self._audio_all_notes_off_safe,
         )
+        self._note_velocities.clear()
         if space_was_overridden or abs(previous_gate - self._sustain_gate_percent) > 0.001:
             self._mark_stats_dirty()
 
@@ -2477,6 +2548,7 @@ class PianoAppController(QObject):
         self._update_stop_event.set()
         self._hq_soundfont_download_active = False
         self._midi_dropdown_refresh_active = False
+        self._recording_save_active = False
         with self._update_lock:
             self._update_check_active = False
             self._update_install_active = False
@@ -2507,6 +2579,7 @@ class PianoAppController(QObject):
         self._safe_call(self._stop_all_notes)
         self._safe_call(self.audio_engine.shutdown)
         self._safe_call(self.window.close_update_progress)
+        self._safe_call(lambda: self.window.set_recording_save_busy(False))
         self._safe_call(self._persist_settings_now)
 
     def run(self) -> None:

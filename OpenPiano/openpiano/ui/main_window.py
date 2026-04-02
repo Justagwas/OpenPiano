@@ -123,6 +123,8 @@ class MainWindow(QMainWindow):
         self._theme_mode = "dark"
         self._tutorial_mode = False
         self._recording_active = False
+        self._recording_has_take = False
+        self._recording_save_busy = False
         self._keybind_edit_active = False
         self._window_pinned = False
         self._ui_scale_steps = int(round((UI_SCALE_MAX - UI_SCALE_MIN) / UI_SCALE_STEP))
@@ -2175,14 +2177,22 @@ class MainWindow(QMainWindow):
 
     def set_recording_state(self, active: bool, has_take: bool) -> None:
         is_active = bool(active)
+        has_recording = bool(has_take)
         self._recording_active = is_active
+        self._recording_has_take = has_recording
         self.recording_toggle_button.blockSignals(True)
         self.recording_toggle_button.setChecked(is_active)
         self.recording_toggle_button.setText("Stop Recording" if is_active else "Start Recording")
         self.recording_toggle_button.blockSignals(False)
-        self.save_recording_button.setEnabled(bool(has_take) and not is_active)
+        self.recording_toggle_button.setEnabled(not self._recording_save_busy)
+        self.save_recording_button.setText("Saving..." if self._recording_save_busy else "Save recording")
+        self.save_recording_button.setEnabled(has_recording and not is_active and not self._recording_save_busy)
         self.recording_indicator.setVisible(is_active)
         self._position_recording_indicator()
+
+    def set_recording_save_busy(self, busy: bool) -> None:
+        self._recording_save_busy = bool(busy)
+        self.set_recording_state(self._recording_active, self._recording_has_take)
 
     def set_recording_elapsed(self, seconds: int) -> None:
         total = max(0, int(seconds))

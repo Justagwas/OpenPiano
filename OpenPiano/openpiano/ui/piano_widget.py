@@ -421,11 +421,12 @@ class PianoWidget(QWidget):
             metrics = QFontMetrics(draw_font)
             lh = max(self._sp(9), int(line_height), metrics.height())
             gap = max(0, int(line_gap))
-            total_height = (lh * len(lines)) - gap
+            line_step = max(self._sp(7), lh - gap)
+            total_height = lh + (line_step * (len(lines) - 1))
             start_y = bottom - total_height
             painter.setFont(draw_font)
             for idx, line in enumerate(lines):
-                y = start_y + (idx * lh)
+                y = start_y + (idx * line_step)
                 painter.drawText(
                     QRectF(rect.left(), y, rect.width(), lh),
                     Qt.AlignHCenter | Qt.AlignVCenter,
@@ -439,21 +440,13 @@ class PianoWidget(QWidget):
             hotkey_bottom = rect.bottom() - self._sp(21) - mode_gap
             note_bottom = rect.bottom() - self._sp(8)
             if hotkey_text and note_text:
-                if "\n" in hotkey_text:
-                    draw_multiline_bottom(
-                        hotkey_bottom,
-                        hotkey_text,
-                        key_font_size,
-                        self._sp(10),
-                        self._sp(3),
-                    )
-                else:
-                    painter.setFont(QFont("Segoe UI", key_font_size, QFont.Weight.Bold))
-                    painter.drawText(
-                        QRectF(rect.left(), hotkey_bottom - self._sp(18), rect.width(), self._sp(18)),
-                        Qt.AlignHCenter | Qt.AlignBottom,
-                        hotkey_text,
-                    )
+                draw_multiline_bottom(
+                    hotkey_bottom,
+                    hotkey_text,
+                    key_font_size,
+                    self._sp(10),
+                    self._sp(3),
+                )
                 painter.setFont(QFont("Segoe UI", note_font_size, QFont.Weight.Bold))
                 painter.drawText(
                     QRectF(rect.left(), note_bottom - self._sp(14), rect.width(), self._sp(14)),
@@ -484,24 +477,16 @@ class PianoWidget(QWidget):
         hotkey_font_size = self._sp(11)
         note_font_size = self._sp(10)
         mode_gap = self._sp(5) if self._mode == "88" else 0
-        hotkey_bottom = rect.bottom() - self._sp(31) - mode_gap
+        hotkey_bottom = rect.bottom() - self._sp(28) - mode_gap
         note_bottom = rect.bottom() - self._sp(9)
         if hotkey_text and note_text:
-            if "\n" in hotkey_text:
-                draw_multiline_bottom(
-                    hotkey_bottom,
-                    hotkey_text,
-                    hotkey_font_size,
-                    self._sp(12),
-                    self._sp(4),
-                )
-            else:
-                painter.setFont(QFont("Segoe UI", hotkey_font_size, QFont.Weight.Bold))
-                painter.drawText(
-                    QRectF(rect.left(), hotkey_bottom - self._sp(20), rect.width(), self._sp(20)),
-                    Qt.AlignHCenter | Qt.AlignBottom,
-                    hotkey_text,
-                )
+            draw_multiline_bottom(
+                hotkey_bottom,
+                hotkey_text,
+                hotkey_font_size,
+                self._sp(12),
+                self._sp(4),
+            )
             painter.setFont(QFont("Segoe UI", note_font_size, QFont.Weight.Bold))
             painter.drawText(
                 QRectF(rect.left(), note_bottom - self._sp(18), rect.width(), self._sp(18)),
@@ -510,21 +495,20 @@ class PianoWidget(QWidget):
             )
         else:
             text = hotkey_text or note_text
-            if "\n" in text:
+            if hotkey_text:
                 draw_multiline_bottom(
-                    rect.bottom() - self._sp(15),
-                    text,
+                    rect.bottom() - self._sp(12),
+                    hotkey_text,
                     hotkey_font_size,
                     self._sp(12),
                     self._sp(4),
                 )
             else:
-                text_font_size = hotkey_font_size if hotkey_text else note_font_size
-                painter.setFont(QFont("Segoe UI", text_font_size, QFont.Weight.Bold))
+                painter.setFont(QFont("Segoe UI", note_font_size, QFont.Weight.Bold))
                 painter.drawText(
                     QRectF(rect.left(), note_bottom - self._sp(18), rect.width(), self._sp(18)),
                     Qt.AlignHCenter | Qt.AlignBottom,
-                    text,
+                    note_text,
                 )
 
     def mousePressEvent(self, event: QMouseEvent) -> None:                          
