@@ -41,10 +41,19 @@ from openpiano.core.config import (
 from openpiano.core.keymap import current_layout_demo_rows, qwerty_demo_rows
 from openpiano.core.object_tree import is_descendant_of
 from openpiano.core.theme import ThemePalette
+from openpiano.ui.combo_options import bank_options, instrument_options, midi_input_options, preset_options
 from openpiano.ui.modal_utils import (
     apply_dialog_button_cursors as apply_dialog_button_cursors_util,
     clear_override_cursors as clear_override_cursors_util,
     message_box_stylesheet as message_box_stylesheet_util,
+    update_progress_stylesheet as update_progress_stylesheet_util,
+)
+from openpiano.ui.panel_drawer import PanelDrawerState
+from openpiano.ui.panel_sections import (
+    add_labeled_slider_row,
+    configure_controls_row,
+    configure_settings_row,
+    create_section_card,
 )
 from openpiano.ui.piano_widget import PianoWidget
 from openpiano.ui.spotlight_overlay import SpotlightOverlay
@@ -119,6 +128,7 @@ class MainWindow(QMainWindow):
         self._applied_ui_scale = 1.0
         self._settings_visible = False
         self._controls_visible = False
+        self._drawer_state = PanelDrawerState()
         self._stats_visible = True
         self._theme_mode = "dark"
         self._tutorial_mode = False
@@ -404,7 +414,7 @@ class MainWindow(QMainWindow):
 
         anim_row = QHBoxLayout()
         self._configure_settings_row(anim_row)
-        anim_label = QLabel("Anim Speed", self.interface_card)
+        anim_label = QLabel("Key backlight fade", self.interface_card)
         anim_label.setObjectName("settingLabel")
         self.anim_speed_combo = ChevronComboBox(self.interface_card)
         self.anim_speed_combo.setObjectName("animCombo")
@@ -555,9 +565,7 @@ class MainWindow(QMainWindow):
         self._controls_labels = [instrument_label, bank_label, preset_label, midi_label]
 
     def _configure_settings_row(self, row: QHBoxLayout) -> None:
-                                                               
-        row.setContentsMargins(6, self._sp(4), 6, self._sp(4))
-        row.setSpacing(self._sp(8))
+        configure_settings_row(row, self._sp)
 
     def _add_labeled_slider_row(
         self,
@@ -571,26 +579,20 @@ class MainWindow(QMainWindow):
         value_text: str,
         on_value_changed: Callable[[int], None],
     ) -> tuple[QSlider, QLabel]:
-        row = QHBoxLayout()
-        self._configure_settings_row(row)
-        label = QLabel(label_text, parent)
-        label.setObjectName("settingLabel")
-        slider = QSlider(Qt.Horizontal, parent)
-        slider.setObjectName(slider_object_name)
-        slider.setRange(int(slider_range[0]), int(slider_range[1]))
-        slider.setValue(int(slider_value))
-        slider.valueChanged.connect(on_value_changed)
-        value_label = QLabel(value_text, parent)
-        value_label.setObjectName("settingValue")
-        row.addWidget(label)
-        row.addWidget(slider, 1)
-        row.addWidget(value_label)
-        section_layout.addLayout(row)
-        return slider, value_label
+        return add_labeled_slider_row(
+            parent,
+            section_layout,
+            label_text=label_text,
+            slider_object_name=slider_object_name,
+            slider_range=slider_range,
+            slider_value=slider_value,
+            value_text=value_text,
+            on_value_changed=on_value_changed,
+            scale=self._sp,
+        )
 
     def _configure_controls_row(self, row: QHBoxLayout) -> None:
-        row.setContentsMargins(4, self._sp(2), 4, self._sp(2))
-        row.setSpacing(self._sp(6))
+        configure_controls_row(row, self._sp)
 
     def _refresh_scaled_layout_metrics(self) -> None:
         controls_outer = self.controls_body.layout()
@@ -672,15 +674,7 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._sync_all_notes_off_width)
 
     def _create_section_card(self, title: str, parent: QWidget) -> tuple[QFrame, QVBoxLayout]:
-        card = QFrame(parent)
-        card.setObjectName("settingsCard")
-        card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(10, 9, 10, 9)
-        card_layout.setSpacing(8)
-        header = QLabel(title, card)
-        header.setObjectName("settingsCardTitle")
-        card_layout.addWidget(header)
-        return card, card_layout
+        return create_section_card(title, parent)
 
     def _setting_sliders(self) -> tuple[QSlider, ...]:
         return (
@@ -1556,20 +1550,7 @@ class MainWindow(QMainWindow):
         return message_box_stylesheet_util(self.theme)
 
     def _update_progress_stylesheet(self) -> str:
-        return (
-            self._message_box_stylesheet()
-            + f"""
-            QProgressBar {{
-                border: 1px solid #2a2a2a;
-                border-radius: 4px;
-                text-align: center;
-            }}
-            QProgressBar::chunk {{
-                background-color: #2fbf71;
-                border-radius: 3px;
-            }}
-            """
-        )
+        return update_progress_stylesheet_util(self.theme)
 
     def _show_themed_message(
         self,
@@ -2120,10 +2101,9 @@ class MainWindow(QMainWindow):
         return target_index
 
     def set_instruments(self, instruments: list[InstrumentInfo], selected_id: str) -> None:
-        options = [(f"{item.name} [{item.source}]", item.id) for item in instruments]
         self._populate_combo(
             self.instrument_combo,
-            options,
+            instrument_options(instruments),
             selected=str(selected_id or ""),
             default_index=0,
         )
@@ -2136,40 +2116,24 @@ class MainWindow(QMainWindow):
         selected_preset: int,
         preset_names: dict[int, str] | None = None,
     ) -> None:
-        bank_options = [(str(bank), int(bank)) for bank in banks]
         self._populate_combo(
             self.bank_combo,
-            bank_options,
+            bank_options(banks),
             selected=int(selected_bank),
             default_index=0,
         )
 
-        labels = preset_names or {}
-        preset_options: list[tuple[str, int]] = []
-        for preset in presets:
-            preset_value = int(preset)
-            preset_name = str(labels.get(preset_value, "")).strip()
-            if preset_name:
-                label = f"{preset_value} - {preset_name}"
-            else:
-                label = str(preset_value)
-            preset_options.append((label, preset_value))
         self._populate_combo(
             self.preset_combo,
-            preset_options,
+            preset_options(presets, preset_names),
             selected=int(selected_preset),
             default_index=0,
         )
 
     def set_midi_input_devices(self, items: list[str], selected: str) -> None:
-        options: list[tuple[str, object]] = [("None", "")]
-        for name in items:
-            label = str(name).strip()
-            if label:
-                options.append((label, label))
         self._populate_combo(
             self.midi_input_combo,
-            options,
+            midi_input_options(items),
             selected=str(selected).strip(),
             default_index=0,
             keep_enabled_when_empty=True,
@@ -2348,21 +2312,24 @@ class MainWindow(QMainWindow):
     def _update_panel_divider_visibility(self) -> None:
         self.panel_divider.setVisible(self._settings_visible and self._controls_visible)
 
-    def set_settings_visible(self, visible: bool) -> None:
-        self._settings_visible = bool(visible)
+    def _sync_drawer_visibility(self) -> None:
+        self._settings_visible = self._drawer_state.settings_visible
+        self._controls_visible = self._drawer_state.controls_visible
         self.settings_scroll.setVisible(self._settings_visible)
-        self.settings_toggle_button.setText("Hide Settings" if self._settings_visible else "Show Settings")
-        self._update_panel_divider_visibility()
-        self._sync_keybind_overlay()
-        self._schedule_layout_refresh()
-
-    def set_controls_visible(self, visible: bool) -> None:
-        self._controls_visible = bool(visible)
         self.controls_scroll.setVisible(self._controls_visible)
+        self.settings_toggle_button.setText("Hide Settings" if self._settings_visible else "Show Settings")
         self.controls_toggle_button.setText("Hide Controls" if self._controls_visible else "Show Controls")
         self._update_panel_divider_visibility()
         self._sync_keybind_overlay()
         self._schedule_layout_refresh()
+
+    def set_settings_visible(self, visible: bool) -> None:
+        self._drawer_state.set_settings_visible(bool(visible))
+        self._sync_drawer_visibility()
+
+    def set_controls_visible(self, visible: bool) -> None:
+        self._drawer_state.set_controls_visible(bool(visible))
+        self._sync_drawer_visibility()
 
     def set_stats_visible(self, visible: bool) -> None:
         self._stats_visible = bool(visible)

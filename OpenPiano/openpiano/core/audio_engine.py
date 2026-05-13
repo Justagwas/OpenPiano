@@ -15,7 +15,7 @@ from openpiano.core.normalize import clamp_float, clamp_int
 from openpiano.core.program_selection import normalize_program_selection
 
 AUDIO_SAMPLE_RATE = 44100
-AUDIO_CHANNEL_COUNT = 128
+DEFAULT_AUDIO_POLYPHONY = 128
 
 
 class AudioEngineProtocol(Protocol):
@@ -96,8 +96,13 @@ class SilentAudioEngine:
 
 
 class FluidSynthAudioEngine:
-    
-    def __init__(self, sample_rate: int = AUDIO_SAMPLE_RATE, channels: int = AUDIO_CHANNEL_COUNT) -> None:
+
+    def __init__(
+        self,
+        sample_rate: int = AUDIO_SAMPLE_RATE,
+        polyphony: int = DEFAULT_AUDIO_POLYPHONY,
+        channels: int | None = None,
+    ) -> None:
         configure_dll_search_paths()
         module, error = ensure_fluidsynth_loaded()
         if module is None:
@@ -112,7 +117,9 @@ class FluidSynthAudioEngine:
             raise RuntimeError(f"Incompatible fluidsynth module without Synth API: {module_path}")
 
         self.sample_rate = int(sample_rate)
-        self.channels = max(16, int(channels))
+        if channels is not None:
+            polyphony = channels
+        self.polyphony = max(16, int(polyphony))
         self.master_volume = 1.0
         self._fluidsynth_module = module
         self._sfid: int | None = None
@@ -141,7 +148,7 @@ class FluidSynthAudioEngine:
         self._synth = self._fluidsynth_module.Synth(samplerate=float(self.sample_rate))
         if hasattr(self._synth, "setting"):
             try:
-                self._synth.setting("synth.polyphony", int(self.channels))
+                self._synth.setting("synth.polyphony", int(self.polyphony))
             except Exception:
                 pass
 
@@ -161,7 +168,7 @@ class FluidSynthAudioEngine:
             return str(kwargs.get("driver", "")).strip().lower()
         except TypeError:
             self._synth.start()
-            return str(kwargs.get("driver", "")).strip().lower()
+            return ""
 
     def _start_synth(self, preferred_driver: str | None = None) -> str:
         last_error: Exception | None = None

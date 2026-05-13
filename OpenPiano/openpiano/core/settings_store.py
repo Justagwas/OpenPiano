@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -172,8 +173,6 @@ def _clamp_keyboard_input_mode(value: Any) -> KeyboardInputMode:
     return "layout"
 
 
-
-
 def _clamp_midi_device_name(value: Any) -> str:
     if not isinstance(value, str):
         return ""
@@ -327,10 +326,26 @@ def save_settings(settings: AppSettings, path: Path | None = None) -> None:
     raw = json.dumps(payload, indent=2)
 
     file_path = _settings_path(path)
+    temp_path: Path | None = None
     try:
         file_path.parent.mkdir(parents=True, exist_ok=True)
-        file_path.write_text(raw, encoding="utf-8")
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=str(file_path.parent),
+            prefix=f".{file_path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            handle.write(raw)
+            handle.flush()
+            os.fsync(handle.fileno())
+            temp_path = Path(handle.name)
+        os.replace(temp_path, file_path)
     except Exception:
-                                                                                            
+        if temp_path is not None:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
         return
-

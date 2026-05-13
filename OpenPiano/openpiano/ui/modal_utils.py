@@ -45,6 +45,23 @@ def message_box_stylesheet(theme: ThemePalette) -> str:
         """
 
 
+def update_progress_stylesheet(theme: ThemePalette) -> str:
+    return (
+        message_box_stylesheet(theme)
+        + f"""
+            QProgressBar {{
+                border: 1px solid {theme.border};
+                border-radius: 4px;
+                text-align: center;
+            }}
+            QProgressBar::chunk {{
+                background-color: {theme.accent};
+                border-radius: 3px;
+            }}
+            """
+    )
+
+
 def apply_dialog_button_cursors(dialog: QWidget) -> None:
     interactive_types = (QPushButton, QComboBox, QSlider, QCheckBox, QAbstractItemView)
     for widget in dialog.findChildren(QWidget):

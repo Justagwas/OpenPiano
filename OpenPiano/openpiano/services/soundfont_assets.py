@@ -3,7 +3,8 @@ from __future__ import annotations
 import time
 import urllib.request
 from pathlib import Path
-from typing import Iterable
+from threading import Event
+from typing import Callable, Iterable
 
 from openpiano.core.instrument_registry import (
     InstrumentInfo,
@@ -26,6 +27,8 @@ def download_file_with_retries(
     retries: int,
     timeout_seconds: float,
     retry_delay_seconds: float,
+    stop_event: Event | None = None,
+    progress_callback: Callable[[int, str], None] | None = None,
 ) -> None:
     request = urllib.request.Request(
         url=url,
@@ -38,17 +41,49 @@ def download_file_with_retries(
     last_error: Exception | None = None
 
     for attempt in range(1, attempts + 1):
+        if stop_event is not None and stop_event.is_set():
+            raise InterruptedError("SoundFont download canceled.")
         try:
             if temp_path.exists():
                 temp_path.unlink()
             with urllib.request.urlopen(request, timeout=timeout) as response, temp_path.open("wb") as target:
+                total_raw = str(response.headers.get("Content-Length", "")).strip()
+                try:
+                    total_bytes = max(0, int(total_raw))
+                except Exception:
+                    total_bytes = 0
+                downloaded = 0
+                if progress_callback is not None:
+                    progress_callback(0, "Downloading SoundFont...")
                 while True:
+                    if stop_event is not None and stop_event.is_set():
+                        raise InterruptedError("SoundFont download canceled.")
                     chunk = response.read(1024 * 1024)
                     if not chunk:
                         break
                     target.write(chunk)
+                    downloaded += len(chunk)
+                    if progress_callback is not None:
+                        if total_bytes > 0:
+                            raw = min(1.0, max(0.0, downloaded / float(total_bytes)))
+                            progress_callback(
+                                max(1, min(99, int(round(raw * 100.0)))),
+                                f"Downloading SoundFont... {int(round(raw * 100.0))}%",
+                            )
+                        else:
+                            mb = downloaded / (1024.0 * 1024.0)
+                            progress_callback(0, f"Downloading SoundFont... {mb:.1f} MB")
             temp_path.replace(target_path)
+            if progress_callback is not None:
+                progress_callback(100, "SoundFont download complete.")
             return
+        except InterruptedError:
+            try:
+                if temp_path.exists():
+                    temp_path.unlink()
+            except Exception:
+                pass
+            raise
         except Exception as exc:
             last_error = exc
             try:
@@ -57,7 +92,12 @@ def download_file_with_retries(
             except Exception:
                 pass
             if attempt < attempts:
-                time.sleep(retry_delay_seconds * attempt)
+                delay = retry_delay_seconds * attempt
+                if stop_event is not None:
+                    if stop_event.wait(delay):
+                        raise InterruptedError("SoundFont download canceled.")
+                else:
+                    time.sleep(delay)
 
     if last_error is not None:
         raise last_error

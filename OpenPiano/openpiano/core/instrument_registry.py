@@ -5,7 +5,7 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 
 from openpiano.core.config import (
     APP_NAME,
@@ -58,10 +58,6 @@ def ensure_user_fonts_dir() -> Path:
     return target
 
 
-def _clamp_int(value: Any, minimum: int, maximum: int, default: int) -> int:
-    return clamp_int(value, minimum, maximum, default=default)
-
-
 def _safe_label(text: str) -> str:
     if not text:
         return "Unnamed"
@@ -82,8 +78,8 @@ def _read_sidecar(soundfont_path: Path) -> tuple[str | None, int, int]:
 
     name = raw.get("name")
     display_name = _safe_label(str(name)) if isinstance(name, str) else None
-    bank = _clamp_int(raw.get("bank"), INSTRUMENT_BANK_MIN, INSTRUMENT_BANK_MAX, 0)
-    preset = _clamp_int(raw.get("preset"), INSTRUMENT_PRESET_MIN, INSTRUMENT_PRESET_MAX, 0)
+    bank = clamp_int(raw.get("bank"), INSTRUMENT_BANK_MIN, INSTRUMENT_BANK_MAX, default=0)
+    preset = clamp_int(raw.get("preset"), INSTRUMENT_PRESET_MIN, INSTRUMENT_PRESET_MAX, default=0)
     return display_name, bank, preset
 
 

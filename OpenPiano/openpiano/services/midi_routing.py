@@ -37,6 +37,11 @@ class MidiRoutingService:
         selected = preferred_device if preferred_device in devices else ""
         set_devices(devices, selected)
 
+    def _current_device_if_available(self, devices: list[str]) -> str:
+        current_getter = getattr(self._midi_manager, "current_device", None)
+        current = str(current_getter() if callable(current_getter) else "").strip()
+        return current if current in devices else ""
+
     def apply_device(
         self,
         *,
@@ -67,11 +72,11 @@ class MidiRoutingService:
             return self.apply_device(device=requested, set_devices=set_devices)
         except Exception as exc:
             devices = self._midi_manager.list_input_devices()
-            selected = requested if requested in devices else ""
+            selected = self._current_device_if_available(devices)
             set_devices(devices, selected)
             if warning_enabled:
                 show_warning(
                     "MIDI Input",
                     f"Could not open MIDI input device:\n{exc}",
                 )
-            return requested
+            return selected
