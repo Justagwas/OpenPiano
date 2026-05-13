@@ -2557,7 +2557,7 @@ class PianoAppController(QObject):
         self._safe_call(self._persist_settings_now)
 
     def run(self) -> None:
-        self.window.show()
+        self.window.show_centered()
         QTimer.singleShot(400, self._post_startup_prompts)
 
     def _post_startup_prompts(self) -> None:

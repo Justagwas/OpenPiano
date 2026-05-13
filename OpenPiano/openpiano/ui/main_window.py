@@ -1412,6 +1412,54 @@ class MainWindow(QMainWindow):
         self._sync_tutorial_overlay()
         self._sync_keybind_overlay()
 
+    def _available_geometry_for_window(self) -> QRect:
+        handle = self.windowHandle()
+        screen = handle.screen() if handle is not None else QGuiApplication.primaryScreen()
+        if screen is None:
+            return QRect(0, 0, 0, 0)
+        return screen.availableGeometry()
+
+    def _fit_to_available_screen(self) -> None:
+        available = self._available_geometry_for_window()
+        if available.isEmpty():
+            return
+        margin = 24
+        max_width = max(1, available.width() - margin)
+        max_height = max(1, available.height() - margin)
+        current_size = self.size()
+        if current_size.width() <= max_width and current_size.height() <= max_height:
+            return
+        width_ratio = max_width / max(1, current_size.width())
+        height_ratio = max_height / max(1, current_size.height())
+        fitted_scale = max(UI_SCALE_MIN, min(self._ui_scale, self._ui_scale * min(width_ratio, height_ratio)))
+        if fitted_scale >= self._ui_scale - 0.001:
+            return
+        self.set_ui_scale(fitted_scale)
+        self.refresh_fixed_size()
+
+    def center_on_screen(self) -> None:
+        self.refresh_fixed_size()
+        self._fit_to_available_screen()
+        available = self._available_geometry_for_window()
+        if available.isEmpty():
+            return
+        frame = self.frameGeometry()
+        frame.moveCenter(available.center())
+        top_left = frame.topLeft()
+        if frame.left() < available.left():
+            top_left.setX(available.left())
+        if frame.top() < available.top():
+            top_left.setY(available.top())
+        if frame.right() > available.right():
+            top_left.setX(max(available.left(), available.right() - frame.width() + 1))
+        if frame.bottom() > available.bottom():
+            top_left.setY(max(available.top(), available.bottom() - frame.height() + 1))
+        self.move(top_left)
+
+    def show_centered(self) -> None:
+        self.show()
+        QTimer.singleShot(0, self.center_on_screen)
+
     def resizeEvent(self, event) -> None:                          
         super().resizeEvent(event)
         self._position_recording_indicator()
