@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Literal
 
 APP_NAME = "OpenPiano"
-APP_VERSION = "1.2.2"
+APP_VERSION = "1.2.3"
 INNO_SETUP_APP_ID = "OpenPianoJustagwas"
 OFFICIAL_WEBSITE_URL = "https://www.justagwas.com/projects/openpiano"
 
@@ -12,6 +12,8 @@ UPDATE_CHECK_MANIFEST_URL = "https://www.justagwas.com/projects/openpiano/latest
 UPDATE_CHECK_SETUP_URL = "https://downloads.justagwas.com/openpiano/OpenPianoSetup.exe"
 
 DEFAULT_THEME_MODE: Literal["dark", "light"] = "dark"
+PianoStyle = Literal["premium", "classic"]
+DEFAULT_PIANO_STYLE: PianoStyle = "premium"
 DEFAULT_MASTER_VOLUME = 0.60
 DEFAULT_NOTE_VELOCITY = 100
 

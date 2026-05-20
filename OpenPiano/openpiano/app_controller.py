@@ -16,6 +16,7 @@ from openpiano.core.config import (
     ANIMATION_PROFILE,
     APP_NAME,
     APP_VERSION,
+    DEFAULT_PIANO_STYLE,
     NOTE_VELOCITY_MAX,
     NOTE_VELOCITY_MIN,
     KPS_WINDOW_SECONDS,
@@ -156,6 +157,7 @@ class PianoAppController(QObject):
         self._show_note_labels = bool(settings.show_note_labels)
         self._theme_mode = settings.theme_mode
         self._ui_scale = _round_scale(settings.ui_scale)
+        self._piano_style = "classic" if settings.piano_style == "classic" else DEFAULT_PIANO_STYLE
         self._animation_speed = (
             settings.animation_speed if settings.animation_speed in ANIMATION_PROFILE else "instant"
         )
@@ -165,6 +167,8 @@ class PianoAppController(QObject):
         self._white_key_pressed_color = settings.white_key_pressed_color
         self._black_key_color = settings.black_key_color
         self._black_key_pressed_color = settings.black_key_pressed_color
+        self._window_x = settings.window_x
+        self._window_y = settings.window_y
         self._hq_soundfont_prompt_seen = bool(settings.hq_soundfont_prompt_seen)
         self._keyboard_input_mode = settings.keyboard_input_mode
         self._keyboard_layout_choice_seen = bool(settings.keyboard_layout_choice_seen)
@@ -329,6 +333,7 @@ class PianoAppController(QObject):
         self.window.keybindEditActionBlocked.connect(self._on_keybind_edit_action_blocked)
         self.window.themeModeChanged.connect(self._on_theme_mode_changed)
         self.window.uiScaleChanged.connect(self._on_ui_scale_changed)
+        self.window.pianoStyleChanged.connect(self._on_piano_style_changed)
         self.window.animationSpeedChanged.connect(self._on_animation_speed_changed)
         self.window.keyColorChanged.connect(self._on_key_color_changed)
         self.window.autoCheckUpdatesChanged.connect(self._on_auto_check_updates_changed)
@@ -348,6 +353,7 @@ class PianoAppController(QObject):
         self.window.tutorialFinishRequested.connect(lambda: self._end_tutorial(completed=True))
         self.window.websiteRequested.connect(self._on_website_requested)
         self.window.resetDefaultsRequested.connect(self._on_reset_defaults_requested)
+        self.window.resetKeyColorsRequested.connect(self._on_reset_key_colors_requested)
         self.window.updateProgressCanceled.connect(self._on_update_progress_canceled)
 
         self.window.piano_widget.notePressed.connect(self._on_mouse_note_pressed)
@@ -365,6 +371,7 @@ class PianoAppController(QObject):
         self.window.set_label_visibility(self._show_key_labels, self._show_note_labels)
         self.window.set_theme_mode(self._theme_mode)
         self.window.set_ui_scale(self._ui_scale)
+        self.window.set_piano_style(self._piano_style)
         self.window.set_animation_speed(self._animation_speed)
         self.window.set_auto_check_updates(self._auto_check_updates)
         self.window.set_stats_visible(self._show_stats)
@@ -378,6 +385,7 @@ class PianoAppController(QObject):
         self.window.set_keybind_edit_mode(self._keybind_edit_active)
 
         self._sync_piano_label_visibility()
+        self.window.piano_widget.set_piano_style(self._piano_style)
         self.window.piano_widget.set_animation_speed(self._animation_speed)
         self.window.piano_widget.set_ui_scale(self._ui_scale)
         self.window.piano_widget.set_key_colors(
@@ -934,6 +942,15 @@ class PianoAppController(QObject):
         self.window.set_ui_scale(self._ui_scale)
         self._schedule_persist()
 
+    def _on_piano_style_changed(self, style: str) -> None:
+        chosen = "classic" if str(style or "").strip().lower() == "classic" else DEFAULT_PIANO_STYLE
+        if chosen == self._piano_style:
+            return
+        self._piano_style = chosen
+        self.window.piano_widget.set_piano_style(self._piano_style)
+        self.window.set_piano_style(self._piano_style)
+        self._schedule_persist()
+
     def _on_animation_speed_changed(self, speed: str) -> None:
         chosen = speed if speed in ANIMATION_PROFILE else "instant"
         if chosen == self._animation_speed:
@@ -955,6 +972,18 @@ class PianoAppController(QObject):
             self._black_key_pressed_color = clean
         else:
             return
+        self._apply_theme()
+        self._schedule_persist()
+
+    def _on_reset_key_colors_requested(self) -> None:
+        self._white_key_color = ""
+        self._white_key_pressed_color = ""
+        self._black_key_color = ""
+        self._black_key_pressed_color = ""
+        self.window.set_key_color("white_key", "")
+        self.window.set_key_color("white_key_pressed", "")
+        self.window.set_key_color("black_key", "")
+        self.window.set_key_color("black_key_pressed", "")
         self._apply_theme()
         self._schedule_persist()
 
@@ -1411,6 +1440,7 @@ class PianoAppController(QObject):
         self._show_note_labels = defaults.show_note_labels
         self._theme_mode = defaults.theme_mode
         self._ui_scale = _round_scale(defaults.ui_scale)
+        self._piano_style = defaults.piano_style
         self._animation_speed = defaults.animation_speed
         self._auto_check_updates = defaults.auto_check_updates
         self._midi_input_device = defaults.midi_input_device
@@ -1418,6 +1448,8 @@ class PianoAppController(QObject):
         self._white_key_pressed_color = defaults.white_key_pressed_color
         self._black_key_color = defaults.black_key_color
         self._black_key_pressed_color = defaults.black_key_pressed_color
+        self._window_x = defaults.window_x
+        self._window_y = defaults.window_y
         self._hq_soundfont_prompt_seen = defaults.hq_soundfont_prompt_seen
         self._keyboard_input_mode = defaults.keyboard_input_mode
         self._keyboard_layout_choice_seen = defaults.keyboard_layout_choice_seen
@@ -1536,6 +1568,9 @@ class PianoAppController(QObject):
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:              
         if watched is self.window and event.type() == QEvent.Close:
             self.shutdown()
+            return False
+        if watched is self.window and event.type() == QEvent.Move:
+            self._on_window_moved()
             return False
         if event.type() in {QEvent.ApplicationDeactivate, QEvent.WindowDeactivate}:
             self._stop_all_notes()
@@ -2137,6 +2172,7 @@ class PianoAppController(QObject):
             instrument_preset=self._instrument_preset,
             theme_mode=self._theme_mode,
             ui_scale=self._ui_scale,
+            piano_style=self._piano_style,
             animation_speed=self._animation_speed,
             auto_check_updates=self._auto_check_updates,
             midi_input_device=self._midi_input_device,
@@ -2144,6 +2180,8 @@ class PianoAppController(QObject):
             white_key_pressed_color=self._white_key_pressed_color,
             black_key_color=self._black_key_color,
             black_key_pressed_color=self._black_key_pressed_color,
+            window_x=self._window_x,
+            window_y=self._window_y,
             hq_soundfont_prompt_seen=self._hq_soundfont_prompt_seen,
             keyboard_input_mode=self._keyboard_input_mode,
             keyboard_layout_choice_seen=self._keyboard_layout_choice_seen,
@@ -2217,6 +2255,20 @@ class PianoAppController(QObject):
             self._persist_settings_now()
         else:
             self._schedule_persist()
+
+    def _on_window_moved(self) -> None:
+        if self._is_shutdown or not self.window.isVisible():
+            return
+        position = self.window.pos()
+        x = int(position.x())
+        y = int(position.y())
+        if not self.window.is_window_position_fully_visible(x, y):
+            return
+        if self._window_x == x and self._window_y == y:
+            return
+        self._window_x = x
+        self._window_y = y
+        self._schedule_persist()
 
     def _is_sustain_temporarily_off(self) -> bool:
         if self._hold_space_for_sustain:
@@ -2557,7 +2609,7 @@ class PianoAppController(QObject):
         self._safe_call(self._persist_settings_now)
 
     def run(self) -> None:
-        self.window.show_centered()
+        self.window.show_at_position_or_centered(self._window_x, self._window_y)
         QTimer.singleShot(400, self._post_startup_prompts)
 
     def _post_startup_prompts(self) -> None:

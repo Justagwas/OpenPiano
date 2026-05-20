@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import signal
 import sys
 from pathlib import Path
 
@@ -78,6 +79,7 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setOrganizationName(APP_NAME)
+    signal.signal(signal.SIGINT, lambda _signum, _frame: app.exit(130))
     icon_path = _resolve_icon_path()
     if icon_path is not None:
         app.setWindowIcon(QIcon(str(icon_path)))
@@ -93,7 +95,11 @@ def main() -> int:
     try:
         controller = PianoAppController(app, icon_path=icon_path)
         controller.run()
-        return app.exec()
+        try:
+            return app.exec()
+        except KeyboardInterrupt:
+            app.quit()
+            return 130
     finally:
         instance_guard.release()
 

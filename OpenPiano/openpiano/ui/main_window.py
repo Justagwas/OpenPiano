@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 from openpiano.core.config import (
     APP_NAME,
     APP_VERSION,
+    DEFAULT_PIANO_STYLE,
     UI_SCALE_MAX,
     UI_SCALE_MIN,
     UI_SCALE_STEP,
@@ -75,6 +76,10 @@ ANIMATION_SPEED_LABELS = {
     "slow": "Slow",
     "very_slow": "Very Slow",
 }
+PIANO_STYLE_LABELS = {
+    "premium": "Premium",
+    "classic": "Classic",
+}
 
 FOOTER_ICON_SIZE = 19
 
@@ -100,6 +105,7 @@ class MainWindow(QMainWindow):
     keybindEditActionBlocked = Signal()
     themeModeChanged = Signal(str)
     uiScaleChanged = Signal(float)
+    pianoStyleChanged = Signal(str)
     animationSpeedChanged = Signal(str)
     keyColorChanged = Signal(str, str)
     autoCheckUpdatesChanged = Signal(bool)
@@ -119,6 +125,7 @@ class MainWindow(QMainWindow):
     tutorialFinishRequested = Signal()
     websiteRequested = Signal()
     resetDefaultsRequested = Signal()
+    resetKeyColorsRequested = Signal()
     updateProgressCanceled = Signal()
 
     def __init__(self, theme: ThemePalette, icon_path: Path | None = None) -> None:
@@ -126,6 +133,7 @@ class MainWindow(QMainWindow):
         self.theme = theme
         self._ui_scale = 1.0
         self._applied_ui_scale = 1.0
+        self._piano_style = DEFAULT_PIANO_STYLE
         self._settings_visible = False
         self._controls_visible = False
         self._drawer_state = PanelDrawerState()
@@ -412,6 +420,30 @@ class MainWindow(QMainWindow):
         self.ui_scale_slider.sliderPressed.connect(self._on_ui_scale_slider_pressed)
         self.ui_scale_slider.sliderReleased.connect(self._on_ui_scale_slider_released)
 
+        piano_style_row = QHBoxLayout()
+        self._configure_settings_row(piano_style_row)
+        piano_style_label = QLabel("Piano Style", self.interface_card)
+        piano_style_label.setObjectName("settingLabel")
+        piano_style_holder = QFrame(self.interface_card)
+        piano_style_holder.setObjectName("modeHolder")
+        piano_style_holder_layout = QHBoxLayout(piano_style_holder)
+        piano_style_holder_layout.setContentsMargins(2, 2, 2, 2)
+        piano_style_holder_layout.setSpacing(2)
+        self.piano_style_group = QButtonGroup(self.interface_card)
+        self.piano_style_group.setExclusive(True)
+        self.piano_style_buttons: dict[str, QPushButton] = {}
+        for style, label in PIANO_STYLE_LABELS.items():
+            button = QPushButton(label, piano_style_holder)
+            button.setObjectName("modeButton")
+            button.setCheckable(True)
+            piano_style_holder_layout.addWidget(button)
+            self.piano_style_group.addButton(button)
+            self.piano_style_buttons[style] = button
+            button.clicked.connect(lambda checked, selected_style=style: self._on_piano_style_clicked(checked, selected_style))
+        piano_style_row.addWidget(piano_style_label)
+        piano_style_row.addWidget(piano_style_holder, 1)
+        interface_layout.addLayout(piano_style_row)
+
         anim_row = QHBoxLayout()
         self._configure_settings_row(anim_row)
         anim_label = QLabel("Key backlight fade", self.interface_card)
@@ -446,6 +478,10 @@ class MainWindow(QMainWindow):
         self.black_key_pressed_color_button.setObjectName("colorButton")
         self.black_key_pressed_color_button.clicked.connect(lambda: self._on_key_color_clicked("black_key_pressed"))
         colors_row.addWidget(self.black_key_pressed_color_button)
+        self.reset_key_colors_button = QPushButton("Reset Colors", self.interface_card)
+        self.reset_key_colors_button.setObjectName("actionButton")
+        self.reset_key_colors_button.clicked.connect(self._on_reset_key_colors_clicked)
+        colors_row.addWidget(self.reset_key_colors_button)
         colors_row.addStretch(1)
         interface_layout.addLayout(colors_row)
 
@@ -1419,6 +1455,29 @@ class MainWindow(QMainWindow):
             return QRect(0, 0, 0, 0)
         return screen.availableGeometry()
 
+    def _available_screen_geometries(self) -> list[QRect]:
+        geometries = [screen.availableGeometry() for screen in QGuiApplication.screens()]
+        return [geometry for geometry in geometries if not geometry.isEmpty()]
+
+    def is_window_position_fully_visible(self, x: int, y: int) -> bool:
+        window_rect = QRect(QPoint(int(x), int(y)), self.size())
+        return any(available.contains(window_rect) for available in self._available_screen_geometries())
+
+    def move_to_saved_position_if_visible(self, x: int | None, y: int | None) -> bool:
+        if x is None or y is None:
+            return False
+        self.refresh_fixed_size()
+        self._fit_to_available_screen()
+        try:
+            target_x = int(x)
+            target_y = int(y)
+        except (TypeError, ValueError):
+            return False
+        if not self.is_window_position_fully_visible(target_x, target_y):
+            return False
+        self.move(QPoint(target_x, target_y))
+        return True
+
     def _fit_to_available_screen(self) -> None:
         available = self._available_geometry_for_window()
         if available.isEmpty():
@@ -1459,6 +1518,14 @@ class MainWindow(QMainWindow):
     def show_centered(self) -> None:
         self.show()
         QTimer.singleShot(0, self.center_on_screen)
+
+    def _restore_position_or_center(self, x: int | None, y: int | None) -> None:
+        if not self.move_to_saved_position_if_visible(x, y):
+            self.center_on_screen()
+
+    def show_at_position_or_centered(self, x: int | None, y: int | None) -> None:
+        self.show()
+        QTimer.singleShot(0, lambda: self._restore_position_or_center(x, y))
 
     def resizeEvent(self, event) -> None:                          
         super().resizeEvent(event)
@@ -1554,6 +1621,11 @@ class MainWindow(QMainWindow):
         if isinstance(speed, str):
             self.animationSpeedChanged.emit(speed)
 
+    def _on_piano_style_clicked(self, checked: bool, style: str) -> None:
+        if not checked:
+            return
+        self.pianoStyleChanged.emit(style)
+
     def _on_key_color_clicked(self, target: str) -> None:
         fallback = {
             "white_key": self.theme.white_key,
@@ -1593,6 +1665,14 @@ class MainWindow(QMainWindow):
             default_yes=False,
         ):
             self.resetDefaultsRequested.emit()
+
+    def _on_reset_key_colors_clicked(self) -> None:
+        if self.ask_yes_no(
+            "Reset Key Colors",
+            "Reset key colors to the current theme defaults?",
+            default_yes=False,
+        ):
+            self.resetKeyColorsRequested.emit()
 
     def _message_box_stylesheet(self) -> str:
         return message_box_stylesheet_util(self.theme)
@@ -2305,6 +2385,16 @@ class MainWindow(QMainWindow):
         self._apply_style()
         self._schedule_layout_refresh()
 
+    def set_piano_style(self, style: str) -> None:
+        target = "classic" if str(style or "").strip().lower() == "classic" else "premium"
+        self._piano_style = target
+        self.piano_widget.set_piano_style(target)
+        for button in self.piano_style_buttons.values():
+            button.blockSignals(True)
+        self.piano_style_buttons[target].setChecked(True)
+        for button in self.piano_style_buttons.values():
+            button.blockSignals(False)
+
     def set_animation_speed(self, speed: str) -> None:
         target = speed if speed in ANIMATION_SPEED_LABELS else "instant"
         self.anim_speed_combo.blockSignals(True)
@@ -2318,6 +2408,18 @@ class MainWindow(QMainWindow):
         self.auto_updates_checkbox.blockSignals(True)
         self.auto_updates_checkbox.setChecked(bool(enabled))
         self.auto_updates_checkbox.blockSignals(False)
+
+    def _readable_text_color(self, background: str) -> str:
+        color = QColor(background)
+        if not color.isValid():
+            return self.theme.text_primary
+        luminance = (
+            (0.2126 * color.redF())
+            + (0.7152 * color.greenF())
+            + (0.0722 * color.blueF())
+        )
+        return "#111111" if luminance > 0.54 else "#F5F5F5"
+
     def _build_key_color_button_style(self, background: str, text_color: str) -> str:
         return (
             f"background: {background}; color: {text_color}; border: 1px solid {self.theme.border}; "
@@ -2345,7 +2447,7 @@ class MainWindow(QMainWindow):
         }
         for key, button in mapping.items():
             color = (self._key_color_values.get(key) or fallback[key]).upper()
-            text_color = "#111111" if key.startswith("white") else "#F5F5F5"
+            text_color = self._readable_text_color(color)
             label = labels.get(key, "Color")
             button.setText(f"{label} {color}")
             button.setToolTip(f"Current color: {color}")

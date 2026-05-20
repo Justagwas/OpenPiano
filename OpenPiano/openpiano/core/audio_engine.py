@@ -163,12 +163,27 @@ class FluidSynthAudioEngine:
         return attempts
 
     def _start_synth_with_kwargs(self, kwargs: dict[str, str]) -> str:
-        try:
-            self._synth.start(**kwargs)
-            return str(kwargs.get("driver", "")).strip().lower()
-        except TypeError:
-            self._synth.start()
-            return ""
+        driver = str(kwargs.get("driver", "")).strip().lower()
+        device = str(kwargs.get("device", "")).strip()
+        if hasattr(self._synth, "setting"):
+            if driver:
+                self._synth.setting("audio.driver", driver)
+            if device and driver:
+                self._synth.setting(f"audio.{driver}.device", device)
+
+        create_audio_driver = getattr(self._fluidsynth_module, "new_fluid_audio_driver", None)
+        if create_audio_driver is None:
+            try:
+                self._synth.start(**kwargs)
+                return driver
+            except TypeError:
+                self._synth.start()
+                return ""
+
+        self._synth.audio_driver = create_audio_driver(self._synth.settings, self._synth.synth)
+        if not self._synth.audio_driver:
+            raise RuntimeError(f"Could not start FluidSynth audio driver '{driver or 'default'}'.")
+        return driver
 
     def _start_synth(self, preferred_driver: str | None = None) -> str:
         last_error: Exception | None = None

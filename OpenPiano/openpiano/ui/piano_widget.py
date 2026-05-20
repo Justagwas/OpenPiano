@@ -5,10 +5,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QPoint, QPointF, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QMouseEvent, QPaintEvent, QPainter, QPen
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QLinearGradient, QMouseEvent, QPaintEvent, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QWidget
 
-from openpiano.core.config import ANIMATION_PROFILE, UI_SCALE_MAX, UI_SCALE_MIN
+from openpiano.core.config import ANIMATION_PROFILE, DEFAULT_PIANO_STYLE, UI_SCALE_MAX, UI_SCALE_MIN
 from openpiano.core.keymap import binding_to_label, is_black_key
 from openpiano.core.theme import ThemePalette, apply_key_color_overrides
 
@@ -36,6 +36,21 @@ def _lerp_color(start: QColor, end: QColor, t: float) -> QColor:
     )
 
 
+def _with_alpha(color: QColor, alpha: int) -> QColor:
+    copy = QColor(color)
+    copy.setAlpha(max(0, min(255, int(alpha))))
+    return copy
+
+
+def _readable_text_color(background: QColor) -> QColor:
+    luminance = (
+        (0.2126 * background.redF())
+        + (0.7152 * background.greenF())
+        + (0.0722 * background.blueF())
+    )
+    return QColor("#111827" if luminance > 0.54 else "#F6F6F6")
+
+
 class PianoWidget(QWidget):
     
     notePressed = Signal(int)
@@ -50,6 +65,7 @@ class PianoWidget(QWidget):
         self._mode: PianoMode = "61"
         self._ui_scale = 1.0
         self._animation_speed: AnimationSpeed = "instant"
+        self._piano_style = DEFAULT_PIANO_STYLE
         self._show_key_labels = True
         self._show_note_labels = True
         self._mapping: dict[int, Binding] = {}
@@ -68,7 +84,6 @@ class PianoWidget(QWidget):
         self._anim_step: dict[int, float] = {}
         self._anim_timer_id = self.startTimer(16)
         self.setMouseTracking(True)
-        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
 
     def _sp(self, value: int) -> int:
         return max(1, int(round(value * self._ui_scale)))
@@ -162,6 +177,13 @@ class PianoWidget(QWidget):
     def set_animation_speed(self, speed: str) -> None:
         speed_value = speed if speed in ANIMATION_PROFILE else "instant"
         self._animation_speed = speed_value                            
+
+    def set_piano_style(self, style: str) -> None:
+        target = "classic" if str(style or "").strip().lower() == "classic" else "premium"
+        if target == self._piano_style:
+            return
+        self._piano_style = target
+        self.update()
 
     def set_key_colors(self, white: str, white_pressed: str, black: str, black_pressed: str) -> None:
         self._theme = apply_key_color_overrides(
@@ -283,14 +305,20 @@ class PianoWidget(QWidget):
         clip = event.rect()
         clip_f = QRectF(clip)
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing, False)
+        painter.setRenderHint(QPainter.Antialiasing, self._piano_style == "premium")
         painter.setClipRegion(event.region())
-        painter.fillRect(clip, QColor(self._theme.panel_bg))
 
         if not self._notes:
             painter.end()
             return
 
+        if self._piano_style == "premium":
+            self._paint_premium(painter, clip_f)
+        else:
+            self._paint_classic(painter, clip_f)
+        painter.end()
+
+    def _paint_classic(self, painter: QPainter, clip_f: QRectF) -> None:
         white_outline = QColor(self._theme.border)
         white_top = QColor("#FFFFFF")
         white_bottom = QColor("#C8C8CC")
@@ -383,7 +411,135 @@ class PianoWidget(QWidget):
             painter.fillRect(selected_rect.adjusted(1.0, 1.0, -1.0, -1.0), accent)
             painter.setPen(QPen(QColor(self._theme.accent), 2))
             painter.drawRect(selected_rect.adjusted(1.0, 1.0, -1.0, -1.0))
-        painter.end()
+
+    def _rounded_path(self, rect: QRectF, radius: float) -> QPainterPath:
+        path = QPainterPath()
+        path.addRoundedRect(rect, radius, radius)
+        return path
+
+    def _pressed_amount(self, note: int) -> float:
+        return self._anim_t.get(note, 1.0 if note in self._pressed_notes else 0.0)
+
+    def _premium_key_gradient(self, rect: QRectF, note: int, *, black: bool) -> QLinearGradient:
+        base = QColor(self._theme.black_key if black else self._theme.white_key)
+        pressed = QColor(self._theme.black_key_pressed if black else self._theme.white_key_pressed)
+        t = self._pressed_amount(note)
+        mixed = _lerp_color(base, pressed, t)
+        gradient = QLinearGradient(rect.topLeft(), rect.bottomLeft())
+        if black:
+            gradient.setColorAt(0.00, mixed.lighter(145))
+            gradient.setColorAt(0.12, mixed.lighter(112))
+            gradient.setColorAt(0.58, mixed)
+            gradient.setColorAt(1.00, mixed.darker(155))
+        else:
+            gradient.setColorAt(0.00, mixed.lighter(112))
+            gradient.setColorAt(0.16, mixed.lighter(104))
+            gradient.setColorAt(0.72, mixed)
+            gradient.setColorAt(1.00, mixed.darker(112))
+        return gradient
+
+    def _draw_premium_backlight(self, painter: QPainter, rect: QRectF, note: int, *, black: bool) -> None:
+        t = self._pressed_amount(note)
+        if t <= 0.001:
+            return
+        accent = QColor(self._theme.black_key_pressed if black else self._theme.white_key_pressed)
+        glow_rect = rect.adjusted(self._sp(2), rect.height() * (0.44 if black else 0.52), -self._sp(2), -self._sp(3))
+        glow = QLinearGradient(glow_rect.topLeft(), glow_rect.bottomLeft())
+        top_alpha = 18 if black else 32
+        mid_alpha = 72 if black else 108
+        bottom_alpha = 126 if black else 168
+        glow.setColorAt(0.00, _with_alpha(accent.lighter(135), int(top_alpha * t)))
+        glow.setColorAt(0.48, _with_alpha(accent.lighter(116), int(mid_alpha * t)))
+        glow.setColorAt(1.00, _with_alpha(accent, int(bottom_alpha * t)))
+        radius = float(self._sp(4 if black else 5))
+        painter.fillPath(self._rounded_path(glow_rect, radius), glow)
+
+        halo = QColor(self._theme.accent_hover)
+        halo.setAlpha(int((64 if black else 42) * t))
+        painter.setPen(QPen(halo, max(1, self._sp(1))))
+        painter.drawRoundedRect(rect.adjusted(1.0, 1.0, -1.0, -1.0), radius, radius)
+
+    def _paint_premium(self, painter: QPainter, clip_f: QRectF) -> None:
+        draw_labels = self._show_key_labels or self._show_note_labels
+        border = QColor(self._theme.border)
+        white_shadow = QColor(0, 0, 0, 28)
+        white_highlight = QColor(255, 255, 255, 170)
+        white_edge = border.darker(126)
+
+        for item in self._white_rects:
+            rect = item.rect
+            if not rect.intersects(clip_f):
+                continue
+            radius = float(self._sp(4))
+            body = rect.adjusted(0.5, 0.5, -0.5, -0.5)
+            path = self._rounded_path(body, radius)
+            painter.fillPath(path, self._premium_key_gradient(body, item.note, black=False))
+            self._draw_premium_backlight(painter, body, item.note, black=False)
+            painter.setPen(QPen(white_edge, 1))
+            painter.drawPath(path)
+            painter.setPen(QPen(white_highlight, 1))
+            painter.drawLine(
+                QPointF(body.left() + self._sp(2), body.top() + self._sp(2)),
+                QPointF(body.right() - self._sp(2), body.top() + self._sp(2)),
+            )
+            painter.setPen(QPen(white_shadow, 1))
+            painter.drawLine(
+                QPointF(body.right() - 1.0, body.top() + self._sp(5)),
+                QPointF(body.right() - 1.0, body.bottom() - self._sp(5)),
+            )
+            if draw_labels:
+                self._draw_labels(painter, item.note, rect, black=False)
+
+        shadow = QColor(0, 0, 0, 88)
+        top_highlight = QColor(255, 255, 255, 82)
+        side_highlight = QColor(255, 255, 255, 28)
+        black_outline = QColor("#050506")
+        for item in self._black_rects:
+            rect = item.rect
+            if not rect.adjusted(-2.0, -2.0, 2.0, self._sp(5)).intersects(clip_f):
+                continue
+            radius = float(self._sp(3))
+            shadow_rect = rect.adjusted(self._sp(1), self._sp(2), self._sp(1), self._sp(4))
+            painter.fillPath(self._rounded_path(shadow_rect, radius), _with_alpha(shadow, 58))
+            body = rect.adjusted(0.5, 0.5, -0.5, -0.5)
+            path = self._rounded_path(body, radius)
+            painter.fillPath(path, self._premium_key_gradient(body, item.note, black=True))
+            self._draw_premium_backlight(painter, body, item.note, black=True)
+            painter.setPen(QPen(black_outline, 1))
+            painter.drawPath(path)
+            painter.setPen(QPen(top_highlight, 1))
+            painter.drawLine(
+                QPointF(body.left() + self._sp(2), body.top() + self._sp(2)),
+                QPointF(body.right() - self._sp(2), body.top() + self._sp(2)),
+            )
+            painter.setPen(QPen(side_highlight, 1))
+            painter.drawLine(
+                QPointF(body.left() + 1.0, body.top() + self._sp(4)),
+                QPointF(body.left() + 1.0, body.bottom() - self._sp(5)),
+            )
+            if draw_labels:
+                self._draw_labels(painter, item.note, rect, black=True)
+
+        first = self._white_rects[0].rect
+        last = self._white_rects[-1].rect
+        outer = QRectF(
+            first.left(),
+            first.top(),
+            (last.right() - first.left()) + 1.0,
+            first.height(),
+        )
+        if outer.intersects(clip_f):
+            painter.setPen(QPen(QColor(self._theme.border).darker(118), 1))
+            painter.drawRoundedRect(outer.adjusted(0.5, 0.5, -0.5, -0.5), self._sp(4), self._sp(4))
+
+        selected = self._selected_keybind_note
+        selected_rect = self._rect_by_note.get(selected) if selected is not None else None
+        if self._keybind_edit_mode and selected_rect is not None and selected_rect.intersects(clip_f):
+            accent = QColor(self._theme.accent)
+            accent.setAlpha(72)
+            painter.fillPath(self._rounded_path(selected_rect.adjusted(1.0, 1.0, -1.0, -1.0), self._sp(4)), accent)
+            painter.setPen(QPen(QColor(self._theme.accent_hover), 2))
+            painter.drawRoundedRect(selected_rect.adjusted(1.0, 1.0, -1.0, -1.0), self._sp(4), self._sp(4))
 
     def _draw_labels(self, painter: QPainter, note: int, rect: QRectF, black: bool) -> None:
         binding = self._mapping.get(note)
@@ -396,8 +552,7 @@ class PianoWidget(QWidget):
         if not hotkey_text and not note_text:
             return
 
-        color = QColor("#F6F6F6" if black else "#111827")
-        painter.setPen(color)
+        painter.setPen(_readable_text_color(self._note_fill_color(note)))
 
         def draw_multiline_bottom(
             bottom: float,

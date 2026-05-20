@@ -11,6 +11,7 @@ from typing import Any, Literal
 
 from openpiano.core.config import (
     APP_NAME,
+    DEFAULT_PIANO_STYLE,
     DEFAULT_MASTER_VOLUME,
     DEFAULT_NOTE_VELOCITY,
     DEFAULT_THEME_MODE,
@@ -27,6 +28,7 @@ from openpiano.core.config import (
     UI_SCALE_MAX,
     UI_SCALE_MIN,
     UI_SCALE_STEP,
+    PianoStyle,
 )
 from openpiano.core.keymap import MIDI_END_88, MIDI_START_88, PianoMode, binding_from_id, binding_to_id
 from openpiano.core.normalize import clamp_float, clamp_int, quantize_step
@@ -55,6 +57,7 @@ class AppSettings:
     instrument_preset: int = 0
     theme_mode: ThemeMode = DEFAULT_THEME_MODE
     ui_scale: float = 1.0
+    piano_style: PianoStyle = DEFAULT_PIANO_STYLE
     animation_speed: AnimationSpeed = "instant"
     auto_check_updates: bool = True
     midi_input_device: str = ""
@@ -62,6 +65,8 @@ class AppSettings:
     white_key_pressed_color: str = ""
     black_key_color: str = ""
     black_key_pressed_color: str = ""
+    window_x: int | None = None
+    window_y: int | None = None
     hq_soundfont_prompt_seen: bool = False
     keyboard_input_mode: KeyboardInputMode = "layout"
     keyboard_layout_choice_seen: bool = False
@@ -117,7 +122,7 @@ def _settings_path(path: Path | None = None) -> Path:
 
 
 def _clamp_mode(value: Any) -> PianoMode:
-    return value if value in {"61", "88"} else "61"
+    return value if isinstance(value, str) and value in {"61", "88"} else "61"
 
 
 def _clamp_volume(value: Any) -> float:
@@ -158,17 +163,23 @@ def _clamp_ui_scale(value: Any) -> float:
 
 
 def _clamp_theme_mode(value: Any) -> ThemeMode:
-    return value if value in {"dark", "light"} else DEFAULT_THEME_MODE
+    return value if isinstance(value, str) and value in {"dark", "light"} else DEFAULT_THEME_MODE
 
 
 def _clamp_animation_speed(value: Any) -> AnimationSpeed:
-    if value in {"instant", "fast", "normal", "slow", "very_slow"}:
+    if isinstance(value, str) and value in {"instant", "fast", "normal", "slow", "very_slow"}:
         return value
     return "instant"
 
 
+def _clamp_piano_style(value: Any) -> PianoStyle:
+    if isinstance(value, str) and value in {"premium", "classic"}:
+        return value
+    return DEFAULT_PIANO_STYLE
+
+
 def _clamp_keyboard_input_mode(value: Any) -> KeyboardInputMode:
-    if value in {"layout", "qwerty"}:
+    if isinstance(value, str) and value in {"layout", "qwerty"}:
         return value
     return "layout"
 
@@ -191,6 +202,16 @@ def _clamp_color(value: Any) -> str:
     if _HEX_COLOR_RE.match(text):
         return text.lower()
     return ""
+
+
+def _clamp_optional_window_position(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return max(-100000, min(100000, parsed))
 
 
 def _clamp_custom_keybinds(value: Any) -> dict[str, str]:
@@ -246,6 +267,7 @@ def load_settings(path: Path | None = None) -> AppSettings:
     )
     theme_mode = _clamp_theme_mode(payload.get("theme_mode"))
     ui_scale = _clamp_ui_scale(payload.get("ui_scale"))
+    piano_style = _clamp_piano_style(payload.get("piano_style"))
     animation_speed = _clamp_animation_speed(payload.get("animation_speed"))
     auto_check_updates = _clamp_bool(payload.get("auto_check_updates"), True)
     midi_input_device = _clamp_midi_device_name(payload.get("midi_input_device"))
@@ -253,6 +275,8 @@ def load_settings(path: Path | None = None) -> AppSettings:
     white_key_pressed_color = _clamp_color(payload.get("white_key_pressed_color"))
     black_key_color = _clamp_color(payload.get("black_key_color"))
     black_key_pressed_color = _clamp_color(payload.get("black_key_pressed_color"))
+    window_x = _clamp_optional_window_position(payload.get("window_x"))
+    window_y = _clamp_optional_window_position(payload.get("window_y"))
     hq_soundfont_prompt_seen = _clamp_bool(payload.get("hq_soundfont_prompt_seen"), False)
     keyboard_input_mode = _clamp_keyboard_input_mode(payload.get("keyboard_input_mode"))
     keyboard_layout_choice_seen = _clamp_bool(payload.get("keyboard_layout_choice_seen"), False)
@@ -274,6 +298,7 @@ def load_settings(path: Path | None = None) -> AppSettings:
         instrument_preset=instrument_preset,
         theme_mode=theme_mode,
         ui_scale=ui_scale,
+        piano_style=piano_style,
         animation_speed=animation_speed,
         auto_check_updates=auto_check_updates,
         midi_input_device=midi_input_device,
@@ -281,6 +306,8 @@ def load_settings(path: Path | None = None) -> AppSettings:
         white_key_pressed_color=white_key_pressed_color,
         black_key_color=black_key_color,
         black_key_pressed_color=black_key_pressed_color,
+        window_x=window_x,
+        window_y=window_y,
         hq_soundfont_prompt_seen=hq_soundfont_prompt_seen,
         keyboard_input_mode=keyboard_input_mode,
         keyboard_layout_choice_seen=keyboard_layout_choice_seen,
@@ -311,6 +338,7 @@ def save_settings(settings: AppSettings, path: Path | None = None) -> None:
         ),
         "theme_mode": _clamp_theme_mode(settings.theme_mode),
         "ui_scale": _clamp_ui_scale(settings.ui_scale),
+        "piano_style": _clamp_piano_style(settings.piano_style),
         "animation_speed": _clamp_animation_speed(settings.animation_speed),
         "auto_check_updates": _clamp_bool(settings.auto_check_updates, True),
         "midi_input_device": _clamp_midi_device_name(settings.midi_input_device),
@@ -318,6 +346,8 @@ def save_settings(settings: AppSettings, path: Path | None = None) -> None:
         "white_key_pressed_color": _clamp_color(settings.white_key_pressed_color),
         "black_key_color": _clamp_color(settings.black_key_color),
         "black_key_pressed_color": _clamp_color(settings.black_key_pressed_color),
+        "window_x": _clamp_optional_window_position(settings.window_x),
+        "window_y": _clamp_optional_window_position(settings.window_y),
         "hq_soundfont_prompt_seen": _clamp_bool(settings.hq_soundfont_prompt_seen, False),
         "keyboard_input_mode": _clamp_keyboard_input_mode(settings.keyboard_input_mode),
         "keyboard_layout_choice_seen": _clamp_bool(settings.keyboard_layout_choice_seen, False),
