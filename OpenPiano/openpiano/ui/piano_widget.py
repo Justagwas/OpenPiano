@@ -95,7 +95,7 @@ class PianoWidget(QWidget):
         return self._sp(220)
 
     def _black_width(self) -> int:
-        return self._sp(18)
+        return self._sp(16)
 
     def _black_height(self) -> int:
         return self._sp(140)
@@ -104,10 +104,10 @@ class PianoWidget(QWidget):
         return self._sp(1)
 
     def _top_margin(self) -> int:
-        return self._sp(8)
+        return self._sp(6)
 
     def _side_margin(self) -> int:
-        return self._sp(12)
+        return self._sp(8)
 
     def sizeHint(self) -> QSize:                          
         width, height = self._desired_size()
@@ -432,10 +432,18 @@ class PianoWidget(QWidget):
             gradient.setColorAt(0.58, mixed)
             gradient.setColorAt(1.00, mixed.darker(155))
         else:
-            gradient.setColorAt(0.00, mixed.lighter(112))
-            gradient.setColorAt(0.16, mixed.lighter(104))
-            gradient.setColorAt(0.72, mixed)
-            gradient.setColorAt(1.00, mixed.darker(112))
+            warm_top = _lerp_color(base, QColor("#FAF7EF"), 0.58)
+            warm_upper = _lerp_color(base, QColor("#F0EDE5"), 0.42)
+            warm_lower = _lerp_color(base, QColor("#DEDAD1"), 0.22)
+            warm_bottom = _lerp_color(base, QColor("#C8C4B9"), 0.32)
+            pressed_top = pressed.lighter(138)
+            pressed_upper = pressed.lighter(108)
+            pressed_lower = pressed
+            pressed_bottom = pressed.darker(142)
+            gradient.setColorAt(0.00, _lerp_color(warm_top, pressed_top, t))
+            gradient.setColorAt(0.18, _lerp_color(warm_upper, pressed_upper, t))
+            gradient.setColorAt(0.66, _lerp_color(warm_lower, pressed_lower, t))
+            gradient.setColorAt(1.00, _lerp_color(warm_bottom, pressed_bottom, t))
         return gradient
 
     def _draw_premium_backlight(self, painter: QPainter, rect: QRectF, note: int, *, black: bool) -> None:
@@ -462,9 +470,11 @@ class PianoWidget(QWidget):
     def _paint_premium(self, painter: QPainter, clip_f: QRectF) -> None:
         draw_labels = self._show_key_labels or self._show_note_labels
         border = QColor(self._theme.border)
-        white_shadow = QColor(0, 0, 0, 28)
         white_highlight = QColor(255, 255, 255, 170)
-        white_edge = border.darker(126)
+        white_edge = _with_alpha(QColor("#9A9286"), 86)
+        white_left_glint = QColor(255, 252, 244, 132)
+        white_right_separator = _with_alpha(QColor("#8B8377"), 34)
+        white_bottom_tone = QColor("#948C7D")
 
         for item in self._white_rects:
             rect = item.rect
@@ -475,6 +485,14 @@ class PianoWidget(QWidget):
             path = self._rounded_path(body, radius)
             painter.fillPath(path, self._premium_key_gradient(body, item.note, black=False))
             self._draw_premium_backlight(painter, body, item.note, black=False)
+            pressed_amount = self._pressed_amount(item.note)
+            lower_tone_rect = body.adjusted(1.0, body.height() * 0.54, -1.0, -1.0)
+            lower_tone = QLinearGradient(lower_tone_rect.topLeft(), lower_tone_rect.bottomLeft())
+            lower_alpha = int(24 * (1.0 - min(0.68, pressed_amount * 0.55)))
+            lower_tone.setColorAt(0.00, _with_alpha(white_bottom_tone, 0))
+            lower_tone.setColorAt(0.46, _with_alpha(white_bottom_tone, int(lower_alpha * 0.34)))
+            lower_tone.setColorAt(1.00, _with_alpha(white_bottom_tone, lower_alpha))
+            painter.fillPath(self._rounded_path(lower_tone_rect, max(1.0, radius - 1.0)), lower_tone)
             painter.setPen(QPen(white_edge, 1))
             painter.drawPath(path)
             painter.setPen(QPen(white_highlight, 1))
@@ -482,7 +500,12 @@ class PianoWidget(QWidget):
                 QPointF(body.left() + self._sp(2), body.top() + self._sp(2)),
                 QPointF(body.right() - self._sp(2), body.top() + self._sp(2)),
             )
-            painter.setPen(QPen(white_shadow, 1))
+            painter.setPen(QPen(white_left_glint, 1))
+            painter.drawLine(
+                QPointF(body.left() + 1.0, body.top() + self._sp(4)),
+                QPointF(body.left() + 1.0, body.bottom() - self._sp(6)),
+            )
+            painter.setPen(QPen(white_right_separator, 1))
             painter.drawLine(
                 QPointF(body.right() - 1.0, body.top() + self._sp(5)),
                 QPointF(body.right() - 1.0, body.bottom() - self._sp(5)),
