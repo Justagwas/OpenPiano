@@ -134,14 +134,14 @@ py OpenPiano.py
   - <https://github.com/Justagwas/OpenPiano/releases>
   - <https://www.justagwas.com/projects/openpiano/download>
   - <https://sourceforge.net/projects/openpiano/>
-- Refer to [`.github/SECURITY.md`](https://github.com/Justagwas/OpenPiano/blob/main/.github/SECURITY.md) for the security policy and private vulnerability reporting procedure.
+- Refer to the repository [Security Policy](https://github.com/Justagwas/OpenPiano/security/policy) for private vulnerability reporting.
 
 ## Contributing
 
 Contributions are welcome.
 
 - Start with [`.github/CONTRIBUTING.md`](https://github.com/Justagwas/OpenPiano/blob/main/.github/CONTRIBUTING.md)
-- Follow [`.github/CODE_OF_CONDUCT.md`](https://github.com/Justagwas/OpenPiano/blob/main/.github/CODE_OF_CONDUCT.md)
+- Follow the shared [Code of Conduct](https://github.com/Justagwas/.github/blob/main/CODE_OF_CONDUCT.md)
 - Use [Issues](https://github.com/Justagwas/OpenPiano/issues) for defect reports, feature proposals, and questions
 - Wiki: <https://github.com/Justagwas/OpenPiano/wiki>
 
