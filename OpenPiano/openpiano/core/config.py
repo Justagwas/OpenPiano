@@ -1,10 +1,12 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, cast
+
+from openpiano.core.normalize import clamp_float, quantize_step
 
 APP_NAME = "OpenPiano"
-APP_VERSION = "1.2.4"
+APP_VERSION = "1.3.0"
 INNO_SETUP_APP_ID = "OpenPianoJustagwas"
 OFFICIAL_WEBSITE_URL = "https://www.justagwas.com/projects/openpiano"
 
@@ -12,8 +14,9 @@ UPDATE_CHECK_MANIFEST_URL = "https://www.justagwas.com/projects/openpiano/latest
 UPDATE_CHECK_SETUP_URL = "https://downloads.justagwas.com/openpiano/OpenPianoSetup.exe"
 
 DEFAULT_THEME_MODE: Literal["dark", "light"] = "dark"
-PianoStyle = Literal["premium", "classic"]
+PianoStyle = Literal["premium", "classic", "effects"]
 DEFAULT_PIANO_STYLE: PianoStyle = "premium"
+PIANO_STYLES: tuple[PianoStyle, ...] = ("premium", "classic", "effects")
 DEFAULT_MASTER_VOLUME = 0.60
 DEFAULT_NOTE_VELOCITY = 100
 
@@ -56,3 +59,14 @@ STAT_TITLES: dict[str, str] = {
     "transpose": "Transpose",
 }
 
+
+def normalize_piano_style(value: object) -> PianoStyle:
+    candidate = str(value or "").strip().lower()
+    if candidate in PIANO_STYLES:
+        return cast(PianoStyle, candidate)
+    return DEFAULT_PIANO_STYLE
+
+
+def normalize_ui_scale(value: object) -> float:
+    parsed = clamp_float(value, UI_SCALE_MIN, UI_SCALE_MAX, default=1.0)
+    return quantize_step(parsed, UI_SCALE_MIN, UI_SCALE_MAX, UI_SCALE_STEP, digits=2)

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QPointF, QRect, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPalette, QPen
+from PySide6.QtCore import QPointF, QRect, QRectF, QTimer, Qt, Signal
+from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPalette, QPen
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -293,11 +293,15 @@ class ComboPopupDelegate(QStyledItemDelegate):
 
 class ChevronComboBox(QComboBox):
     popupAboutToShow = Signal()
+    popupClosed = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._arrow_idle = QColor("#B7B7BC")
         self._arrow_active = QColor("#F4F4F5")
+        self._mouse_popup_pending = False
+        self._mouse_press_focus: QWidget | None = None
+        self._mouse_popup_focus_restore: QWidget | None = None
         self._popup_delegate = ComboPopupDelegate(self)
         popup_view = QListView(self)
         popup_view.setUniformItemSizes(True)
@@ -371,3 +375,67 @@ class ChevronComboBox(QComboBox):
     def showPopup(self) -> None:
         self.popupAboutToShow.emit()
         super().showPopup()
+
+    def hidePopup(self) -> None:
+        view = self.view()
+        was_open = bool(view is not None and view.isVisible())
+        restore_focus = self._mouse_popup_focus_restore
+        self._mouse_popup_focus_restore = None
+        super().hidePopup()
+        if was_open:
+            self.popupClosed.emit()
+        if restore_focus is not None:
+            QTimer.singleShot(0, lambda widget=restore_focus: self._restore_mouse_popup_focus(widget))
+
+    @staticmethod
+    def _restore_mouse_popup_focus(widget: QWidget) -> None:
+        try:
+            if widget.isEnabled() and widget.isVisible():
+                widget.setFocus(Qt.PopupFocusReason)
+        except RuntimeError:
+            return
+
+    def _show_mouse_requested_popup(self) -> None:
+        if not self.isEnabled() or not self.isVisible() or self.count() <= 0:
+            self._mouse_press_focus = None
+            return
+        view = self.view()
+        if view is not None and view.isVisible():
+            self._mouse_press_focus = None
+            return
+        self._mouse_popup_focus_restore = self._mouse_press_focus
+        self._mouse_press_focus = None
+        self.showPopup()
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() != Qt.LeftButton or not self.isEnabled() or self.count() <= 0:
+            self._mouse_popup_pending = False
+            self._mouse_press_focus = None
+            return super().mousePressEvent(event)
+        self._mouse_popup_pending = self.rect().contains(event.position().toPoint())
+        if not self._mouse_popup_pending:
+            self._mouse_press_focus = None
+            return super().mousePressEvent(event)
+        self._mouse_press_focus = QApplication.focusWidget()
+        event.accept()
+        self.update()
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.LeftButton:
+            self.mousePressEvent(event)
+            return
+        super().mouseDoubleClickEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if not self._mouse_popup_pending or event.button() != Qt.LeftButton:
+            self._mouse_popup_pending = False
+            self._mouse_press_focus = None
+            return super().mouseReleaseEvent(event)
+        self._mouse_popup_pending = False
+        should_open = self.rect().contains(event.position().toPoint())
+        event.accept()
+        self.update()
+        if should_open:
+            QTimer.singleShot(0, self._show_mouse_requested_popup)
+        else:
+            self._mouse_press_focus = None

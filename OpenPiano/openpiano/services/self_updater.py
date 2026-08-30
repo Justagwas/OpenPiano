@@ -41,6 +41,8 @@ _VALID_UPDATE_CHANNELS = {"stable", "nightly"}
 _REQUEST_RETRIES = 3
 _REQUEST_RETRY_DELAY_SECONDS = 0.5
 _UPDATE_STAGING_PREFIX = "openpiano-update-"
+_MAX_MANIFEST_BYTES = 1024 * 1024
+_UPDATE_STAGING_MAX_AGE_SECONDS = 24 * 60 * 60
 
 
 def normalize_version(version_text: str) -> str:
@@ -335,7 +337,11 @@ class SelfUpdater:
     def _fetch_manifest(self, *, stop_event: Event | None = None) -> UpdateManifest:
         if not _url_allowed(self._manifest_url, allowed_hosts=_MANIFEST_ALLOWED_HOSTS):
             raise RuntimeError("Manifest URL is missing or untrusted.")
-        payload, _ = self._request_text(self._manifest_url, stop_event=stop_event)
+        payload, _ = self._request_text(
+            self._manifest_url,
+            stop_event=stop_event,
+            allowed_hosts=_MANIFEST_ALLOWED_HOSTS,
+        )
         data = json.loads(payload)
         if not isinstance(data, dict):
             raise RuntimeError("latest.json did not return a JSON object")
@@ -407,7 +413,13 @@ class SelfUpdater:
             minimum_supported_version=minimum_supported,
         )
 
-    def _request_text(self, url: str, *, stop_event: Event | None = None) -> tuple[str, str]:
+    def _request_text(
+        self,
+        url: str,
+        *,
+        stop_event: Event | None = None,
+        allowed_hosts: set[str] | None = None,
+    ) -> tuple[str, str]:
         _ensure_not_stopped(stop_event)
         request = Request(
             url=url,
@@ -418,8 +430,11 @@ class SelfUpdater:
             request,
             timeout=self._timeout_seconds,
             stop_event=stop_event,
+            allowed_hosts=allowed_hosts or _UPDATE_ALLOWED_HOSTS,
+            max_bytes=_MAX_MANIFEST_BYTES,
         )
-        if not _url_allowed(final_url, allowed_hosts=_UPDATE_ALLOWED_HOSTS):
+        final_allowed_hosts = allowed_hosts or _UPDATE_ALLOWED_HOSTS
+        if not _url_allowed(final_url, allowed_hosts=final_allowed_hosts):
             raise RuntimeError("Update endpoint redirected to an untrusted host.")
         body = payload.decode("utf-8-sig", errors="replace")
         _ensure_not_stopped(stop_event)
@@ -431,6 +446,8 @@ class SelfUpdater:
         *,
         timeout: float,
         stop_event: Event | None = None,
+        allowed_hosts: set[str],
+        max_bytes: int,
     ) -> tuple[bytes, str]:
         attempts = max(1, int(_REQUEST_RETRIES))
         timeout_seconds = max(0.1, float(timeout))
@@ -440,11 +457,20 @@ class SelfUpdater:
             _ensure_not_stopped(stop_event)
             try:
                 with urlopen(request, timeout=timeout_seconds) as response:
-                    payload = response.read()
                     final_url = str(response.geturl() or request.full_url)
+                    if not _url_allowed(final_url, allowed_hosts=allowed_hosts):
+                        raise RuntimeError("Update endpoint redirected to an untrusted host.")
+                    content_length = _safe_int(response.headers.get("Content-Length"))
+                    if content_length > max_bytes:
+                        raise RuntimeError("Update manifest exceeded the maximum allowed size.")
+                    payload = response.read(max_bytes + 1)
+                    if len(payload) > max_bytes:
+                        raise RuntimeError("Update manifest exceeded the maximum allowed size.")
                 _ensure_not_stopped(stop_event)
                 return payload, final_url
             except InterruptedError:
+                raise
+            except RuntimeError:
                 raise
             except Exception as exc:
                 last_error = exc
@@ -703,6 +729,12 @@ class SelfUpdater:
         for child in self._runtime_storage_dir.iterdir():
             if not child.is_dir() or not child.name.startswith(_UPDATE_STAGING_PREFIX):
                 continue
+            try:
+                age_seconds = max(0.0, time.time() - child.stat().st_mtime)
+            except Exception:
+                continue
+            if age_seconds < _UPDATE_STAGING_MAX_AGE_SECONDS:
+                continue
             self._remove_tree(child)
 
     def _cleanup_legacy_updates_root(self) -> None:
@@ -711,21 +743,49 @@ class SelfUpdater:
             return
         self._remove_tree(legacy_root)
 
-    @staticmethod
-    def _remove_tree(root: Path) -> None:
+    def _cleanup_target_allowed(self, root: Path) -> bool:
         try:
-            for walk_root, dirs, files in os.walk(root, topdown=False):
+            resolved = Path(root).resolve()
+            storage = self._runtime_storage_dir.resolve()
+        except Exception:
+            return False
+        if resolved == storage:
+            return False
+        if not (resolved == storage / "updates" or resolved.name.startswith(_UPDATE_STAGING_PREFIX)):
+            return False
+        try:
+            resolved.relative_to(storage)
+            return True
+        except ValueError:
+            return False
+
+    def _remove_tree(self, root: Path) -> None:
+        root_path = Path(root)
+        if not self._cleanup_target_allowed(root_path):
+            return
+        root_norm = self._normalize_path_for_compare(root_path)
+        try:
+            for walk_root, dirs, files in os.walk(root_path, topdown=False):
+                walk_norm = self._normalize_path_for_compare(walk_root)
+                if not self._path_is_within_root(walk_norm, root_norm):
+                    continue
                 for file_name in files:
                     try:
-                        Path(walk_root, file_name).unlink(missing_ok=True)
+                        target = Path(walk_root, file_name)
+                        target_norm = self._normalize_path_for_compare(target)
+                        if self._path_is_within_root(target_norm, root_norm):
+                            target.unlink(missing_ok=True)
                     except Exception:
                         pass
                 for dir_name in dirs:
                     try:
-                        Path(walk_root, dir_name).rmdir()
+                        target = Path(walk_root, dir_name)
+                        target_norm = self._normalize_path_for_compare(target)
+                        if self._path_is_within_root(target_norm, root_norm):
+                            target.rmdir()
                     except Exception:
                         pass
-            root.rmdir()
+            root_path.rmdir()
         except Exception:
             return
 

@@ -38,6 +38,7 @@ from openpiano.core.config import (
     UI_SCALE_MAX,
     UI_SCALE_MIN,
     UI_SCALE_STEP,
+    normalize_piano_style,
 )
 from openpiano.core.keymap import current_layout_demo_rows, qwerty_demo_rows
 from openpiano.core.object_tree import is_descendant_of
@@ -79,6 +80,7 @@ ANIMATION_SPEED_LABELS = {
 PIANO_STYLE_LABELS = {
     "premium": "Premium",
     "classic": "Classic",
+    "effects": "Effects",
 }
 
 FOOTER_ICON_SIZE = 19
@@ -134,6 +136,11 @@ class MainWindow(QMainWindow):
         self._ui_scale = 1.0
         self._applied_ui_scale = 1.0
         self._piano_style = DEFAULT_PIANO_STYLE
+        self._effects_layout_active = False
+        self._effects_panels_detached = False
+        self._effects_previous_geometry: QRect | None = None
+        self._effects_previous_window_flags: Qt.WindowType | None = None
+        self._layout_transition_id = 0
         self._settings_visible = False
         self._controls_visible = False
         self._drawer_state = PanelDrawerState()
@@ -159,6 +166,7 @@ class MainWindow(QMainWindow):
         self._wheel_allowed_widgets: tuple[QWidget, ...] = ()
         self._wheel_allowed_widget_ids: set[int] = set()
         self._global_event_filter_installed = False
+        self._pending_midi_input_devices: tuple[list[str], str] | None = None
         self._last_stylesheet = ""
         self._update_progress_dialog: QProgressDialog | None = None
         self._key_color_values: dict[str, str] = {
@@ -191,6 +199,7 @@ class MainWindow(QMainWindow):
         outer = QVBoxLayout(root)
         outer.setContentsMargins(14, 14, 14, 10)
         outer.setSpacing(10)
+        self._outer_layout = outer
 
         self.piano_widget = PianoWidget(self.theme, root)
         outer.addWidget(self.piano_widget, 0, Qt.AlignHCenter)
@@ -557,6 +566,7 @@ class MainWindow(QMainWindow):
         self.midi_input_combo.setObjectName("midiInputCombo")
         self.midi_input_combo.currentIndexChanged.connect(self._on_midi_input_index_changed)
         self.midi_input_combo.popupAboutToShow.connect(self.midiInputDropdownOpened.emit)
+        self.midi_input_combo.popupClosed.connect(self._schedule_pending_midi_input_devices)
         self.recording_toggle_button = QPushButton("Start Recording", self.controls_card)
         self.recording_toggle_button.setObjectName("actionButton")
         self.recording_toggle_button.setCheckable(True)
@@ -699,7 +709,7 @@ class MainWindow(QMainWindow):
         self.save_recording_button.setMaximumHeight(controls_row_height)
         footer_layout = getattr(self, "_footer_layout", None)
         if isinstance(footer_layout, QHBoxLayout):
-            footer_layout.setContentsMargins(self._sp(6), 0, self._sp(6), 0)
+            footer_layout.setContentsMargins(self._sp(6), self._sp(2), self._sp(6), self._sp(2))
             footer_layout.setSpacing(self._sp(8))
         if hasattr(self, "theme_toggle_button"):
             icon_px = max(18, self._sp(FOOTER_ICON_SIZE - 2))
@@ -784,7 +794,7 @@ class MainWindow(QMainWindow):
         self.footer_bar = QFrame(self.centralWidget())
         self.footer_bar.setObjectName("footerBar")
         row = QHBoxLayout(self.footer_bar)
-        row.setContentsMargins(self._sp(6), 0, self._sp(6), 0)
+        row.setContentsMargins(self._sp(6), self._sp(2), self._sp(6), self._sp(2))
         row.setSpacing(self._sp(8))
         self._footer_layout = row
 
@@ -952,10 +962,10 @@ class MainWindow(QMainWindow):
         self.piano_widget.setFocusPolicy(Qt.StrongFocus)
         for button in self.findChildren(QPushButton):
             self._set_widget_cursor(button)
-            button.setFocusPolicy(Qt.NoFocus)
+            button.setFocusPolicy(Qt.TabFocus)
         for combo in self.findChildren(QComboBox):
             self._set_widget_cursor(combo)
-            combo.setFocusPolicy(Qt.NoFocus)
+            combo.setFocusPolicy(Qt.TabFocus)
             view = combo.view()
             if view is not None:
                 self._set_widget_cursor(view)
@@ -964,10 +974,10 @@ class MainWindow(QMainWindow):
                     self._set_widget_cursor(viewport)
         for checkbox in self.findChildren(QCheckBox):
             self._set_widget_cursor(checkbox)
-            checkbox.setFocusPolicy(Qt.NoFocus)
+            checkbox.setFocusPolicy(Qt.TabFocus)
         for slider in self.findChildren(QSlider):
             self._set_widget_cursor(slider)
-            slider.setFocusPolicy(Qt.NoFocus)
+            slider.setFocusPolicy(Qt.TabFocus)
 
     @staticmethod
     def _set_widget_cursor(widget: QWidget) -> None:
@@ -1150,6 +1160,11 @@ class MainWindow(QMainWindow):
         self.all_notes_off_button.setMaximumWidth(target_width)
 
     def _apply_style(self) -> None:
+        light_theme = QColor(self.theme.app_bg).lightnessF() > 0.6
+        accent_foreground = "#FFFFFF"
+        stats_slot_bg = "#F7F4EF" if light_theme else "transparent"
+        popup_body_bg = self.theme.panel_bg if light_theme else self.theme.app_bg
+        effects_backdrop = "#D9B4BA" if light_theme else self.theme.app_bg
         label_font = self._sp(11)
         value_font = self._sp(11)
         stats_value_font = self._sp(12)
@@ -1173,14 +1188,23 @@ class MainWindow(QMainWindow):
             QMainWindow {{
                 background-color: {self.theme.app_bg};
             }}
+            QMainWindow[effectsLayout="true"] {{
+                background-color: {effects_backdrop};
+            }}
             #statsBar {{
                 background: {self.theme.panel_bg};
                 border: 1px solid {self.theme.border};
                 border-radius: 8px;
             }}
+            #statsBar[effectsPopup="true"] {{
+                background: {self.theme.panel_bg};
+                border: 1px solid {self.theme.border};
+                border-radius: 8px;
+            }}
             #statsSlot {{
-                background: transparent;
+                background: {stats_slot_bg};
                 border: none;
+                border-radius: 6px;
                 min-width: {self._sp(112)}px;
             }}
             #statsTitle {{
@@ -1199,6 +1223,12 @@ class MainWindow(QMainWindow):
                 background: {self.theme.app_bg};
                 border: none;
             }}
+            QScrollArea#settingsScroll[effectsPopup="true"],
+            QScrollArea#controlsScroll[effectsPopup="true"] {{
+                background: {self.theme.panel_bg};
+                border: 1px solid {self.theme.border};
+                border-radius: 8px;
+            }}
             QScrollArea#settingsScroll QWidget#qt_scrollarea_viewport {{
                 background: {self.theme.app_bg};
                 border: none;
@@ -1206,6 +1236,15 @@ class MainWindow(QMainWindow):
             QScrollArea#controlsScroll QWidget#qt_scrollarea_viewport {{
                 background: {self.theme.app_bg};
                 border: none;
+            }}
+            QScrollArea#settingsScroll[effectsPopup="true"] QWidget#qt_scrollarea_viewport,
+            QScrollArea#controlsScroll[effectsPopup="true"] QWidget#qt_scrollarea_viewport {{
+                background: {self.theme.panel_bg};
+                border: none;
+            }}
+            QScrollArea#settingsScroll[effectsPopup="true"] #settingsBody,
+            QScrollArea#controlsScroll[effectsPopup="true"] #controlsBody {{
+                background: {popup_body_bg};
             }}
             #settingsBody {{
                 background: {self.theme.app_bg};
@@ -1261,7 +1300,7 @@ class MainWindow(QMainWindow):
                 background: {self.theme.panel_bg};
             }}
             #modeButton:checked {{
-                color: {self.theme.text_primary};
+                color: {accent_foreground};
                 background: {self.theme.accent};
             }}
             #instrumentCombo, #bankCombo, #presetCombo, #animCombo, #midiInputCombo {{
@@ -1310,6 +1349,7 @@ class MainWindow(QMainWindow):
                 color: {self.theme.text_primary};
                 border: 1px solid {self.theme.border};
                 selection-background-color: {self.theme.accent};
+                selection-color: {accent_foreground};
                 font: 600 {label_font}pt "Segoe UI";
             }}
             #volumeSlider,
@@ -1349,7 +1389,7 @@ class MainWindow(QMainWindow):
             }}
             #colorButton:hover, #actionButton:hover, #resetButton:hover {{
                 background: {self.theme.accent};
-                color: {self.theme.text_primary};
+                color: {accent_foreground};
             }}
             #actionButton:disabled {{
                 color: {self.theme.text_secondary};
@@ -1372,9 +1412,9 @@ class MainWindow(QMainWindow):
                 background: transparent;
                 color: {self.theme.accent};
                 border: none;
-                padding-top: 1px;
+                padding-top: 2px;
                 padding-right: 2px;
-                padding-bottom: 0px;
+                padding-bottom: 2px;
                 padding-left: 2px;
                 font: 700 {footer_font}pt "Segoe UI";
                 text-align: left;
@@ -1392,11 +1432,9 @@ class MainWindow(QMainWindow):
                 background: transparent;
                 color: {self.theme.text_primary};
                 border: none;
-                min-width: {self._sp(FOOTER_ICON_SIZE)}px;
-                min-height: {self._sp(FOOTER_ICON_SIZE)}px;
-                max-width: {self._sp(FOOTER_ICON_SIZE)}px;
-                max-height: {self._sp(FOOTER_ICON_SIZE)}px;
-                padding: 0;
+                min-width: {self._sp(FOOTER_ICON_SIZE + 5)}px;
+                min-height: {self._sp(FOOTER_ICON_SIZE + 5)}px;
+                padding: 2px;
                 margin: 0;
             }}
             #footerIcon:hover {{
@@ -1415,7 +1453,7 @@ class MainWindow(QMainWindow):
         self._refresh_slider_style_colors()
         self._refresh_checkbox_style_colors()
         hover = QColor(self.theme.border)
-        hover = hover.lighter(128) if self._theme_mode == "dark" else hover.darker(108)
+        hover = hover.darker(108) if light_theme else hover.lighter(128)
         for combo in self.findChildren(ChevronComboBox):
             combo.set_arrow_colors(self.theme.text_secondary, self.theme.text_primary)
             combo.set_popup_colors(
@@ -1432,13 +1470,222 @@ class MainWindow(QMainWindow):
         keybind_overlay = getattr(self, "_keybind_overlay", None)
         if keybind_overlay is not None:
             keybind_overlay.set_theme(self.theme)
+        self._position_effects_overlays()
 
     def _schedule_layout_refresh(self) -> None:
         if self._layout_refresh_timer.isActive():
             return
         self._layout_refresh_timer.start()
 
+    def _set_effects_panels_attached(self, attached: bool) -> None:
+        root = self.centralWidget()
+        if root is None:
+            return
+        if attached:
+            if not self._effects_panels_detached:
+                self.footer_bar.show()
+                return
+            normal_widgets = (
+                self.stats_bar,
+                self.controls_scroll,
+                self.panel_divider,
+                self.settings_scroll,
+            )
+            self._outer_layout.removeWidget(self.footer_bar)
+            for widget in normal_widgets:
+                self._outer_layout.removeWidget(widget)
+            for index, widget in enumerate(normal_widgets, start=1):
+                self._outer_layout.insertWidget(index, widget)
+            self._outer_layout.addWidget(self.footer_bar)
+            self._effects_panels_detached = False
+            self.stats_bar.setProperty("effectsPopup", False)
+            self.controls_scroll.setProperty("effectsPopup", False)
+            self.settings_scroll.setProperty("effectsPopup", False)
+            self._refresh_effects_popup_polish()
+            self.footer_bar.show()
+            return
+
+        if self._effects_panels_detached:
+            return
+        for widget in (self.stats_bar, self.controls_scroll, self.panel_divider, self.settings_scroll):
+            self._outer_layout.removeWidget(widget)
+        self._effects_panels_detached = True
+        self.stats_bar.setProperty("effectsPopup", True)
+        self.controls_scroll.setProperty("effectsPopup", True)
+        self.settings_scroll.setProperty("effectsPopup", True)
+        self._refresh_effects_popup_polish()
+
+    def _refresh_effects_popup_polish(self) -> None:
+        for widget in (self.stats_bar, self.controls_scroll, self.settings_scroll):
+            widget.style().unpolish(widget)
+            widget.style().polish(widget)
+            widget.update()
+
+    def _set_window_resizable_for_effects(self, enabled: bool) -> QRect | None:
+        maximum = 16777215
+        if enabled:
+            if self._effects_previous_geometry is None and not self.isFullScreen():
+                self._effects_previous_geometry = self.geometry()
+            if self._effects_previous_window_flags is None:
+                self._effects_previous_window_flags = self.windowFlags()
+            self.setMinimumSize(0, 0)
+            self.setMaximumSize(maximum, maximum)
+            was_visible = self.isVisible()
+            if hasattr(Qt, "MSWindowsFixedSizeDialogHint"):
+                self.setWindowFlag(Qt.MSWindowsFixedSizeDialogHint, False)
+            self.setWindowFlag(Qt.FramelessWindowHint, True)
+            if was_visible:
+                self.showFullScreen()
+                QTimer.singleShot(0, lambda: self._apply_windows_borderless_frame(True))
+            return None
+
+        self.setMinimumSize(0, 0)
+        self.setMaximumSize(maximum, maximum)
+        was_visible = self.isVisible()
+        if self.isFullScreen():
+            self.showNormal()
+        flags = self._effects_previous_window_flags
+        self._effects_previous_window_flags = None
+        if flags is None:
+            self.setWindowFlag(Qt.FramelessWindowHint, False)
+            if hasattr(Qt, "MSWindowsFixedSizeDialogHint"):
+                self.setWindowFlag(Qt.MSWindowsFixedSizeDialogHint, True)
+        else:
+            self.setWindowFlags(flags)
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, self._window_pinned)
+        if was_visible and not self.isVisible():
+            self.show()
+        self._apply_windows_borderless_frame(False)
+        previous = self._effects_previous_geometry
+        self._effects_previous_geometry = None
+        return previous
+
+    def _position_effects_overlays(self) -> None:
+        if not self._effects_layout_active:
+            return
+        root = self.centralWidget()
+        if root is None:
+            return
+        margin = self._sp(14)
+        gap = self._sp(10)
+        width = max(1, min(root.width() - (margin * 2), self._sp(980)))
+        x = max(margin, int((root.width() - width) / 2))
+        piano_key_top = self.piano_widget.y() + self.piano_widget.key_top_y()
+        footer_top = self.footer_bar.y() if self.footer_bar.y() > 0 else root.height()
+        bottom_anchor = min(footer_top - gap, piano_key_top - gap)
+        y = max(margin, bottom_anchor)
+        for widget, visible in (
+            (self.controls_scroll, self._controls_visible),
+            (self.stats_bar, self._stats_visible),
+            (self.settings_scroll, self._settings_visible),
+        ):
+            if visible:
+                widget.show()
+                if widget is self.controls_scroll:
+                    desired_height = self._sp(90)
+                elif widget is self.settings_scroll:
+                    desired_height = self._sp(236)
+                else:
+                    desired_height = max(self._sp(56), widget.sizeHint().height())
+                available_height = max(self._sp(42), y - margin)
+                height = min(desired_height, available_height)
+                y -= height
+                widget.setGeometry(x, max(margin, y), width, height)
+                widget.raise_()
+                y -= gap
+            else:
+                widget.hide()
+        self.footer_bar.raise_()
+        self.recording_indicator.raise_()
+
+    def _finalize_normal_layout_transition(
+        self,
+        transition_id: int,
+        previous_geometry: QRect | None = None,
+    ) -> None:
+        if transition_id != self._layout_transition_id or self._effects_layout_active:
+            return
+        root = self.centralWidget()
+        if root is None:
+            return
+        self._set_effects_panels_attached(True)
+        self.stats_bar.setVisible(self._stats_visible)
+        self.controls_scroll.setVisible(self._controls_visible)
+        self.settings_scroll.setVisible(self._settings_visible)
+        self._update_panel_divider_visibility()
+        self.footer_bar.show()
+        self._outer_layout.invalidate()
+        root.updateGeometry()
+        self.refresh_fixed_size()
+        if previous_geometry is not None and not previous_geometry.isEmpty():
+            self._restore_position_or_center(previous_geometry.x(), previous_geometry.y())
+        self.footer_bar.raise_()
+
+    def _schedule_normal_layout_restoration(self, previous_geometry: QRect | None) -> None:
+        transition_id = self._layout_transition_id
+        saved_geometry = (
+            QRect(previous_geometry)
+            if previous_geometry is not None and not previous_geometry.isEmpty()
+            else None
+        )
+        QTimer.singleShot(
+            0,
+            lambda: self._finalize_normal_layout_transition(transition_id, saved_geometry),
+        )
+        # setWindowFlags() recreates the native window on Windows. A second,
+        # guarded pass runs after that frame change has settled and prevents a
+        # stale fullscreen geometry from pushing the footer outside the window.
+        QTimer.singleShot(
+            50,
+            lambda: self._finalize_normal_layout_transition(transition_id),
+        )
+
+    def _set_effects_layout_active(self, active: bool) -> None:
+        target = bool(active)
+        if target == self._effects_layout_active:
+            self._position_effects_overlays()
+            return
+        self._layout_transition_id += 1
+        self._effects_layout_active = target
+        self.setProperty("effectsLayout", target)
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.update()
+
+        if target:
+            self._set_effects_panels_attached(False)
+            self.stats_bar.setVisible(self._stats_visible)
+            self.panel_divider.setVisible(False)
+            self._outer_layout.setContentsMargins(0, 0, 0, 0)
+            self._outer_layout.setSpacing(0)
+            self._outer_layout.setAlignment(self.piano_widget, Qt.AlignmentFlag(0))
+            self.piano_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            self._set_window_resizable_for_effects(True)
+            self._sync_drawer_visibility()
+            self._position_effects_overlays()
+            return
+
+        self._outer_layout.setContentsMargins(14, 14, 14, 10)
+        self._outer_layout.setSpacing(10)
+        self._outer_layout.setAlignment(self.piano_widget, Qt.AlignHCenter)
+        self.piano_widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+        previous_geometry = self._set_window_resizable_for_effects(False)
+        self._set_effects_panels_attached(True)
+        self.stats_bar.setVisible(self._stats_visible)
+        self._sync_drawer_visibility()
+        self.footer_bar.show()
+        self._outer_layout.invalidate()
+        self._schedule_normal_layout_restoration(previous_geometry)
+
     def refresh_fixed_size(self) -> None:
+        if self._effects_layout_active:
+            self.centralWidget().layout().activate()
+            self._position_recording_indicator()
+            QTimer.singleShot(0, self._sync_all_notes_off_width)
+            self._sync_tutorial_overlay()
+            self._sync_keybind_overlay()
+            self._position_effects_overlays()
+            return
         self.centralWidget().layout().activate()
         self.adjustSize()
         target_size = self.sizeHint()
@@ -1515,15 +1762,35 @@ class MainWindow(QMainWindow):
             top_left.setY(max(available.top(), available.bottom() - frame.height() + 1))
         self.move(top_left)
 
-    def show_centered(self) -> None:
-        self.show()
-        QTimer.singleShot(0, self.center_on_screen)
-
     def _restore_position_or_center(self, x: int | None, y: int | None) -> None:
         if not self.move_to_saved_position_if_visible(x, y):
             self.center_on_screen()
 
     def show_at_position_or_centered(self, x: int | None, y: int | None) -> None:
+        if self._effects_layout_active:
+            previous = self._effects_previous_geometry
+            if previous is not None and not previous.isEmpty() and x is not None and y is not None:
+                try:
+                    saved_position = QPoint(int(x), int(y))
+                    candidate = QRect(saved_position, previous.size())
+                except (TypeError, ValueError):
+                    saved_position = None
+                    candidate = QRect()
+                target_screen = QGuiApplication.screenAt(saved_position) if saved_position is not None else None
+                if target_screen is not None:
+                    self.winId()
+                    handle = self.windowHandle()
+                    if handle is not None:
+                        handle.setScreen(target_screen)
+                if any(available.contains(candidate) for available in self._available_screen_geometries()):
+                    self._effects_previous_geometry = candidate
+            # Do not apply the saved normal-mode geometry before fullscreen.
+            # On Windows that intermediate oversized fixed geometry produces a
+            # visible frame flash and a QWindowsWindow::setGeometry warning.
+            self.showFullScreen()
+            QTimer.singleShot(0, lambda: self._apply_windows_borderless_frame(True))
+            QTimer.singleShot(0, self._position_effects_overlays)
+            return
         self.show()
         QTimer.singleShot(0, lambda: self._restore_position_or_center(x, y))
 
@@ -1533,10 +1800,12 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._sync_all_notes_off_width)
         self._sync_tutorial_overlay()
         self._sync_keybind_overlay()
+        self._position_effects_overlays()
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
         self._apply_windows_title_bar_theme()
+        self._apply_windows_borderless_frame(self._effects_layout_active)
 
     def _on_mode_clicked(self, checked: bool, mode: str) -> None:
         if checked:
@@ -1569,6 +1838,24 @@ class MainWindow(QMainWindow):
         device = self.midi_input_combo.itemData(index, role=Qt.UserRole)
         if isinstance(device, str):
             self.midiInputDeviceChanged.emit(device)
+
+    def _schedule_pending_midi_input_devices(self) -> None:
+        if self._pending_midi_input_devices is not None:
+            QTimer.singleShot(0, self._apply_pending_midi_input_devices)
+
+    def _apply_pending_midi_input_devices(self) -> None:
+        pending = self._pending_midi_input_devices
+        if pending is None:
+            return
+        view = self.midi_input_combo.view()
+        if view is not None and view.isVisible():
+            return
+        self._pending_midi_input_devices = None
+        items, selected = pending
+        current_data = self.midi_input_combo.currentData(Qt.UserRole)
+        current = str(current_data).strip() if isinstance(current_data, str) else ""
+        preferred = current if (not current or current in items) else selected
+        self._set_midi_input_devices_now(items, preferred)
 
     def _on_volume_value_changed(self, value: int) -> None:
         self.volume_value.setText(f"{value}%")
@@ -2153,7 +2440,7 @@ class MainWindow(QMainWindow):
             choice["mode"] = mode
             _finish()
 
-        cancel_button.clicked.connect(lambda _checked=False: _set_choice("layout"))
+        cancel_button.clicked.connect(lambda _checked=False: _finish())
         overlay.destroyed.connect(_finish)
 
         apply_dialog_button_cursors_util(overlay)
@@ -2163,7 +2450,8 @@ class MainWindow(QMainWindow):
         loop.exec()
         overlay.deleteLater()
         self._restore_cursor_state_after_modal()
-        return str(choice["mode"] or "")
+        selected = choice["mode"]
+        return str(selected) if selected is not None else None
 
     def _apply_windows_title_bar_theme(self, target: QWidget | None = None) -> None:
         if sys.platform != "win32":
@@ -2189,6 +2477,35 @@ class MainWindow(QMainWindow):
         except Exception:
             return
 
+    def _apply_windows_borderless_frame(self, enabled: bool) -> None:
+        """Hide the residual Windows 11 DWM border and rounded corners."""
+        if sys.platform != "win32":
+            return
+        hwnd = int(self.winId())
+        if hwnd <= 0:
+            return
+        try:
+            import ctypes
+
+            # Windows 11 can retain a one-pixel DWM outline even for a Qt
+            # FramelessWindowHint window. DWMWA_COLOR_NONE removes that outline.
+            border_color = ctypes.c_uint(0xFFFFFFFE if enabled else 0xFFFFFFFF)
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                ctypes.c_void_p(hwnd),
+                ctypes.c_uint(34),  # DWMWA_BORDER_COLOR
+                ctypes.byref(border_color),
+                ctypes.sizeof(border_color),
+            )
+            corner_preference = ctypes.c_int(1 if enabled else 0)
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                ctypes.c_void_p(hwnd),
+                ctypes.c_uint(33),  # DWMWA_WINDOW_CORNER_PREFERENCE
+                ctypes.byref(corner_preference),
+                ctypes.sizeof(corner_preference),
+            )
+        except Exception:
+            return
+
     def set_theme(self, theme: ThemePalette) -> None:
         self.theme = theme
         self.stats_bar.set_theme(theme)
@@ -2208,10 +2525,15 @@ class MainWindow(QMainWindow):
         default_index: int = -1,
         keep_enabled_when_empty: bool = False,
     ) -> int:
-        combo.blockSignals(True)
-        combo.clear()
-        for label, user_data in options:
-            combo.addItem(label, userData=user_data)
+        signals_were_blocked = combo.blockSignals(True)
+        current_options = [
+            (combo.itemText(index), combo.itemData(index, role=Qt.UserRole))
+            for index in range(combo.count())
+        ]
+        if current_options != options:
+            combo.clear()
+            for label, user_data in options:
+                combo.addItem(label, userData=user_data)
 
         target_index = -1
         for idx in range(combo.count()):
@@ -2224,7 +2546,7 @@ class MainWindow(QMainWindow):
         if target_index >= 0:
             combo.setCurrentIndex(target_index)
 
-        combo.blockSignals(False)
+        combo.blockSignals(signals_were_blocked)
         combo.setEnabled(keep_enabled_when_empty or combo.count() > 0)
         return target_index
 
@@ -2259,6 +2581,16 @@ class MainWindow(QMainWindow):
         )
 
     def set_midi_input_devices(self, items: list[str], selected: str) -> None:
+        normalized_items = [str(item).strip() for item in items if str(item).strip()]
+        normalized_selected = str(selected).strip()
+        view = self.midi_input_combo.view()
+        if view is not None and view.isVisible():
+            self._pending_midi_input_devices = (normalized_items, normalized_selected)
+            return
+        self._pending_midi_input_devices = None
+        self._set_midi_input_devices_now(normalized_items, normalized_selected)
+
+    def _set_midi_input_devices_now(self, items: list[str], selected: str) -> None:
         self._populate_combo(
             self.midi_input_combo,
             midi_input_options(items),
@@ -2386,7 +2718,7 @@ class MainWindow(QMainWindow):
         self._schedule_layout_refresh()
 
     def set_piano_style(self, style: str) -> None:
-        target = "classic" if str(style or "").strip().lower() == "classic" else "premium"
+        target = normalize_piano_style(style)
         self._piano_style = target
         self.piano_widget.set_piano_style(target)
         for button in self.piano_style_buttons.values():
@@ -2394,6 +2726,7 @@ class MainWindow(QMainWindow):
         self.piano_style_buttons[target].setChecked(True)
         for button in self.piano_style_buttons.values():
             button.blockSignals(False)
+        self._set_effects_layout_active(target == "effects")
 
     def set_animation_speed(self, speed: str) -> None:
         target = speed if speed in ANIMATION_SPEED_LABELS else "instant"
@@ -2469,7 +2802,11 @@ class MainWindow(QMainWindow):
         self.controls_scroll.setVisible(self._controls_visible)
         self.settings_toggle_button.setText("Hide Settings" if self._settings_visible else "Show Settings")
         self.controls_toggle_button.setText("Hide Controls" if self._controls_visible else "Show Controls")
-        self._update_panel_divider_visibility()
+        if self._effects_layout_active:
+            self.panel_divider.setVisible(False)
+            self._position_effects_overlays()
+        else:
+            self._update_panel_divider_visibility()
         self._sync_keybind_overlay()
         self._schedule_layout_refresh()
 
@@ -2485,6 +2822,7 @@ class MainWindow(QMainWindow):
         self._stats_visible = bool(visible)
         self.stats_bar.setVisible(self._stats_visible)
         self.stats_toggle_button.setText("Hide Stats" if self._stats_visible else "Show Stats")
+        self._position_effects_overlays()
         self._schedule_layout_refresh()
 
     def set_stats_values(self, values: dict[str, str], sustain_active: bool) -> None:
@@ -2605,4 +2943,3 @@ class MainWindow(QMainWindow):
             hint_rect = QRect(hint_top_left, hint_widget.size())
             targets.append(row_rect.united(hint_rect))
         overlay.set_target_rects(targets)
-

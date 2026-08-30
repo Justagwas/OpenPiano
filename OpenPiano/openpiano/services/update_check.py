@@ -37,7 +37,19 @@ class UpdateCheckService:
             install_dir=executable_dir(),
             runtime_storage_dir=storage_root,
         )
-        Thread(target=self._updater.recover_pending_update, daemon=True).start()
+        self._recovery_done = Event()
+        Thread(target=self._recover_pending_update, daemon=True).start()
+
+    def _recover_pending_update(self) -> None:
+        try:
+            self._updater.recover_pending_update()
+        finally:
+            self._recovery_done.set()
+
+    def _wait_for_recovery(self, stop_event: Event | None) -> None:
+        while not self._recovery_done.wait(0.05):
+            if stop_event is not None and stop_event.is_set():
+                raise InterruptedError("Update operation stopped.")
 
     def check_for_updates(self, current_version: str, *, stop_event: Event | None = None) -> UpdateCheckData:
         return self._updater.check_for_updates(current_version, stop_event=stop_event)
@@ -49,6 +61,7 @@ class UpdateCheckService:
         stop_event: Event | None = None,
         progress_callback: ProgressCallback | None = None,
     ) -> PreparedUpdateInstall:
+        self._wait_for_recovery(stop_event)
         return self._updater.prepare_update(
             check_data,
             stop_event=stop_event,

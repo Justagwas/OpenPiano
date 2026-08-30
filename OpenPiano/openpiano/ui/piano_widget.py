@@ -1,6 +1,8 @@
 
 from __future__ import annotations
 
+import random
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -8,7 +10,13 @@ from PySide6.QtCore import QPoint, QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QLinearGradient, QMouseEvent, QPaintEvent, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QWidget
 
-from openpiano.core.config import ANIMATION_PROFILE, DEFAULT_PIANO_STYLE, UI_SCALE_MAX, UI_SCALE_MIN
+from openpiano.core.config import (
+    ANIMATION_PROFILE,
+    DEFAULT_PIANO_STYLE,
+    UI_SCALE_MAX,
+    UI_SCALE_MIN,
+    normalize_piano_style,
+)
 from openpiano.core.keymap import binding_to_label, is_black_key
 from openpiano.core.theme import ThemePalette, apply_key_color_overrides
 
@@ -21,6 +29,31 @@ if TYPE_CHECKING:
 class _KeyRect:
     note: int
     rect: QRectF
+
+
+@dataclass(slots=True)
+class _EffectStream:
+    note: int
+    x: float
+    key_top: float
+    width: float
+    height: float
+    started_at: float
+    released_at: float | None = None
+    release_distance: float = 0.0
+    release_duration: float = 1.2
+    release_height: float = 0.0
+
+
+@dataclass(slots=True)
+class _EffectSpark:
+    x: float
+    y: float
+    dx: float
+    dy: float
+    size: float
+    started_at: float
+    duration: float
 
 
 def _lerp_channel(a: int, b: int, t: float) -> int:
@@ -57,6 +90,9 @@ class PianoWidget(QWidget):
     noteReleased = Signal(int)
     dragNoteChanged = Signal(object)
     keybindKeySelected = Signal(int)
+    _MAX_EFFECT_SPARKS = 96
+    _MAX_RELEASED_STREAMS = 72
+    _EFFECT_SPEED_PER_SECOND = 260
 
     def __init__(self, theme: ThemePalette, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -82,8 +118,30 @@ class PianoWidget(QWidget):
         self._selected_keybind_note: int | None = None
         self._anim_t: dict[int, float] = {}
         self._anim_step: dict[int, float] = {}
-        self._anim_timer_id = self.startTimer(16)
+        self._active_effect_streams: dict[int, _EffectStream] = {}
+        self._released_effect_streams: list[_EffectStream] = []
+        self._effect_sparks: list[_EffectSpark] = []
+        self._last_effect_tick = 0.0
+        self._anim_timer_id = 0
         self.setMouseTracking(True)
+
+    def _ensure_animation_timer(self) -> None:
+        if self._anim_timer_id == 0:
+            self._anim_timer_id = self.startTimer(16)
+
+    def _animation_timer_needed(self) -> bool:
+        if self._anim_step or self._released_effect_streams or self._effect_sparks:
+            return True
+        if self._piano_style != "effects" or not self._active_effect_streams:
+            return False
+        max_height = max(self._sp(42), self._top_margin() - self._sp(10))
+        return any(stream.height < max_height for stream in self._active_effect_streams.values())
+
+    def _stop_animation_timer_if_idle(self) -> None:
+        if self._anim_timer_id != 0 and not self._animation_timer_needed():
+            timer_id = self._anim_timer_id
+            self._anim_timer_id = 0
+            self.killTimer(timer_id)
 
     def _sp(self, value: int) -> int:
         return max(1, int(round(value * self._ui_scale)))
@@ -104,9 +162,14 @@ class PianoWidget(QWidget):
         return self._sp(1)
 
     def _top_margin(self) -> int:
+        if self._piano_style == "effects":
+            dynamic = int(self.height()) - self._white_height() - self._side_margin()
+            return max(0, dynamic)
         return self._sp(6)
 
     def _side_margin(self) -> int:
+        if self._piano_style == "effects":
+            return self._sp(24)
         return self._sp(8)
 
     def sizeHint(self) -> QSize:                          
@@ -115,13 +178,22 @@ class PianoWidget(QWidget):
 
     def minimumSizeHint(self) -> QSize:                          
         width, height = self._desired_size()
+        if self._piano_style == "effects":
+            width = 0
+            height = self._white_height() + self._side_margin()
         return QSize(width, height)
 
     def _desired_size(self) -> tuple[int, int]:
         white_count = max(1, self._white_note_count)
         width = (self._side_margin() * 2) + (white_count * self._white_width()) + ((white_count - 1) * self._gap())
-        height = (self._top_margin() * 2) + self._white_height()
+        if self._piano_style == "effects":
+            height = self._sp(640)
+            return width, height
+        height = self._top_margin() + self._white_height() + self._side_margin()
         return width, height
+
+    def key_top_y(self) -> int:
+        return self._top_margin()
 
     def set_theme(self, theme: ThemePalette) -> None:
         self._base_theme = theme
@@ -148,6 +220,7 @@ class PianoWidget(QWidget):
         self._pressed_notes.clear()
         self._anim_t.clear()
         self._anim_step.clear()
+        self.clear_effects()
         self._rebuild_geometry()
         self.updateGeometry()
         self.update()
@@ -179,10 +252,14 @@ class PianoWidget(QWidget):
         self._animation_speed = speed_value                            
 
     def set_piano_style(self, style: str) -> None:
-        target = "classic" if str(style or "").strip().lower() == "classic" else "premium"
+        target = normalize_piano_style(style)
         if target == self._piano_style:
             return
         self._piano_style = target
+        if target != "effects":
+            self.clear_effects()
+        self._rebuild_geometry()
+        self.updateGeometry()
         self.update()
 
     def set_key_colors(self, white: str, white_pressed: str, black: str, black_pressed: str) -> None:
@@ -194,6 +271,89 @@ class PianoWidget(QWidget):
             black_pressed=black_pressed,
         )
         self.update()
+
+    def clear_effects(self) -> None:
+        self._active_effect_streams.clear()
+        self._released_effect_streams.clear()
+        self._effect_sparks.clear()
+        self._last_effect_tick = 0.0
+        self._update_effect_stage()
+        self._stop_animation_timer_if_idle()
+
+    def _effect_stage_update_rect(self) -> QRect:
+        key_top = self._top_margin()
+        return self.rect().adjusted(0, 0, 0, -(self.height() - key_top - self._sp(3)))
+
+    def _update_effect_stage(self) -> None:
+        rect = self._effect_stage_update_rect()
+        if rect.isValid() and not rect.isEmpty():
+            self.update(rect)
+
+    def _trim_released_streams(self) -> None:
+        overflow = len(self._released_effect_streams) - self._MAX_RELEASED_STREAMS
+        if overflow <= 0:
+            return
+        self._released_effect_streams.sort(key=lambda stream: stream.released_at or 0.0)
+        del self._released_effect_streams[:overflow]
+
+    def _effect_speed(self) -> float:
+        return float(self._sp(self._EFFECT_SPEED_PER_SECOND))
+
+    def _start_note_effect(self, note: int, rect: QRectF) -> None:
+        if self._piano_style != "effects":
+            return
+        now = time.monotonic()
+        width_inset = min(self._sp(5 if not is_black_key(note) else 3), rect.width() * 0.22)
+        stream = _EffectStream(
+            note=note,
+            x=rect.center().x(),
+            key_top=rect.top(),
+            width=max(self._sp(5), rect.width() - width_inset),
+            height=float(self._sp(14)),
+            started_at=now,
+        )
+        self._active_effect_streams[note] = stream
+
+        active_pressure = min(
+            1.0,
+            (
+                len(self._active_effect_streams)
+                + len(self._released_effect_streams)
+                + len(self._effect_sparks) / 18.0
+            )
+            / 42.0,
+        )
+        spark_count = 4 if active_pressure > 0.72 else (6 if is_black_key(note) else 9)
+        for _ in range(spark_count):
+            self._effect_sparks.append(
+                _EffectSpark(
+                    x=rect.center().x() + random.uniform(-rect.width() * 0.36, rect.width() * 0.36),
+                    y=rect.top() + random.uniform(-self._sp(3), self._sp(5)),
+                    dx=random.uniform(-self._sp(26), self._sp(26)),
+                    dy=random.uniform(-self._sp(72), -self._sp(18)),
+                    size=random.uniform(self._sp(1), self._sp(3)),
+                    started_at=now,
+                    duration=random.uniform(0.34, 0.78),
+                )
+            )
+        if len(self._effect_sparks) > self._MAX_EFFECT_SPARKS:
+            del self._effect_sparks[: len(self._effect_sparks) - self._MAX_EFFECT_SPARKS]
+        self._trim_released_streams()
+        self._ensure_animation_timer()
+        self._update_effect_stage()
+
+    def _release_note_effect(self, note: int) -> None:
+        stream = self._active_effect_streams.pop(note, None)
+        if stream is None:
+            return
+        stream.released_at = time.monotonic()
+        stream.release_height = max(stream.height, self._sp(14))
+        stream.release_distance = max(self._sp(140), stream.key_top + stream.release_height + self._sp(54))
+        stream.release_duration = max(0.78, stream.release_distance / max(1.0, self._effect_speed()))
+        self._released_effect_streams.append(stream)
+        self._trim_released_streams()
+        self._ensure_animation_timer()
+        self._update_effect_stage()
 
     def set_pressed(self, note: int, pressed: bool) -> None:
         if note not in self._rect_by_note:
@@ -216,9 +376,14 @@ class PianoWidget(QWidget):
             start = self._anim_t.get(note, 1.0 if was_pressed else 0.0)
             self._anim_t[note] = start
             self._anim_step[note] = (1.0 / max(1, frames)) * (1.0 if target_pressed else -1.0)
+            self._ensure_animation_timer()
 
         rect = self._rect_by_note.get(note)
         if rect is not None:
+            if target_pressed:
+                self._start_note_effect(note, rect)
+            else:
+                self._release_note_effect(note)
             self.update(rect.toRect().adjusted(-2, -2, 2, 2))
 
     def note_at(self, pos: QPoint) -> int | None:
@@ -238,7 +403,11 @@ class PianoWidget(QWidget):
     def timerEvent(self, event) -> None:                          
         if event.timerId() != self._anim_timer_id:
             return super().timerEvent(event)
+        needs_effect_update = self._advance_effects()
         if not self._anim_step:
+            if needs_effect_update:
+                self._update_effect_stage()
+            self._stop_animation_timer_if_idle()
             return
         changed_rects: list[QRect] = []
         for note, step in list(self._anim_step.items()):
@@ -253,6 +422,54 @@ class PianoWidget(QWidget):
                 changed_rects.append(rect.toRect().adjusted(-2, -2, 2, 2))
         for rect in changed_rects:
             self.update(rect)
+        if needs_effect_update:
+            self._update_effect_stage()
+        self._stop_animation_timer_if_idle()
+
+    def _advance_effects(self) -> bool:
+        if self._piano_style != "effects":
+            if self._active_effect_streams or self._released_effect_streams or self._effect_sparks:
+                self.clear_effects()
+            return False
+        if (
+            not self._active_effect_streams
+            and not self._released_effect_streams
+            and not self._effect_sparks
+        ):
+            return False
+        now = time.monotonic()
+        if self._last_effect_tick > 0 and (now - self._last_effect_tick) < 0.012:
+            return False
+        self._last_effect_tick = now
+        max_height = max(self._sp(42), self._top_margin() - self._sp(10))
+        changed = False
+        speed = self._effect_speed()
+        for stream in self._active_effect_streams.values():
+            held = max(0.0, now - stream.started_at)
+            stream.key_top = float(self._top_margin())
+            next_height = min(float(max_height), self._sp(18) + (held * speed))
+            if abs(next_height - stream.height) > 0.01:
+                stream.height = next_height
+                changed = True
+
+        kept_released: list[_EffectStream] = []
+        for stream in self._released_effect_streams:
+            release_t = (now - (stream.released_at or now)) / max(0.001, stream.release_duration)
+            if release_t >= 1.0:
+                changed = True
+            else:
+                kept_released.append(stream)
+                changed = True
+        if len(kept_released) != len(self._released_effect_streams):
+            self._released_effect_streams = kept_released
+        before_sparks = len(self._effect_sparks)
+        if before_sparks:
+            self._effect_sparks = [
+                spark for spark in self._effect_sparks
+                if (now - spark.started_at) < spark.duration
+            ]
+            changed = changed or len(self._effect_sparks) != before_sparks
+        return changed
 
     def _rebuild_geometry(self) -> None:
         self._white_rects.clear()
@@ -268,6 +485,14 @@ class PianoWidget(QWidget):
         gap = float(self._gap())
         top = float(self._top_margin())
         left = float(self._side_margin())
+
+        if self._piano_style == "effects":
+            # Scale the keyboard to the fullscreen stage while retaining a
+            # small inset so the outer keys are not pressed against the display.
+            available_width = max(1.0, float(self.width()) - (left * 2.0))
+            total_gaps = gap * max(0, self._white_note_count - 1)
+            white_w = max(1.0, (available_width - total_gaps) / max(1, self._white_note_count))
+            black_w = max(1.0, white_w * (self._black_width() / max(1, self._white_width())))
 
         white_x_by_note: dict[int, float] = {}
         x = left
@@ -294,6 +519,15 @@ class PianoWidget(QWidget):
             self._black_rects.append(_KeyRect(note=note, rect=rect))
             self._rect_by_note[note] = rect
 
+        for note, stream in self._active_effect_streams.items():
+            rect = self._rect_by_note.get(note)
+            if rect is None:
+                continue
+            width_inset = min(self._sp(5 if not is_black_key(note) else 3), rect.width() * 0.22)
+            stream.x = rect.center().x()
+            stream.key_top = rect.top()
+            stream.width = max(self._sp(5), rect.width() - width_inset)
+
     def _note_fill_color(self, note: int) -> QColor:
         is_black = is_black_key(note)
         base = QColor(self._theme.black_key if is_black else self._theme.white_key)
@@ -305,18 +539,180 @@ class PianoWidget(QWidget):
         clip = event.rect()
         clip_f = QRectF(clip)
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing, self._piano_style == "premium")
+        painter.setRenderHint(QPainter.Antialiasing, self._piano_style in {"premium", "effects"})
         painter.setClipRegion(event.region())
 
         if not self._notes:
             painter.end()
             return
 
-        if self._piano_style == "premium":
+        if self._piano_style == "effects":
+            self._paint_effects_layer(painter, clip_f)
+            self._paint_premium(painter, clip_f)
+        elif self._piano_style == "premium":
             self._paint_premium(painter, clip_f)
         else:
             self._paint_classic(painter, clip_f)
         painter.end()
+
+    def _effect_color(self) -> QColor:
+        color = QColor(self._theme.white_key_pressed)
+        if not color.isValid():
+            color = QColor(self._theme.accent)
+        return color
+
+    def _is_light_theme(self) -> bool:
+        background = QColor(self._theme.app_bg)
+        return background.isValid() and background.lightnessF() > 0.6
+
+    def _paint_effects_layer(self, painter: QPainter, clip_f: QRectF) -> None:
+        now = time.monotonic()
+        base = self._effect_color()
+        light_theme = self._is_light_theme()
+        painter.save()
+        painter.setPen(Qt.NoPen)
+        key_top = float(self._top_margin())
+        stage_rect = QRectF(0.0, 0.0, float(self.width()), key_top + self._sp(2))
+        if light_theme:
+            painter.fillRect(QRectF(self.rect()), QColor("#D9B4BA"))
+        if stage_rect.intersects(clip_f):
+            stage = QLinearGradient(stage_rect.topLeft(), stage_rect.bottomLeft())
+            if light_theme:
+                stage.setColorAt(0.00, QColor("#E5E7EB"))
+                stage.setColorAt(0.36, QColor("#F5F1EE"))
+                stage.setColorAt(0.74, QColor("#EADDDD"))
+                stage.setColorAt(1.00, QColor("#D9B4BA"))
+            else:
+                stage.setColorAt(0.00, QColor(5, 7, 10, 32))
+                stage.setColorAt(0.52, QColor(32, 12, 18, 18))
+                stage.setColorAt(0.84, QColor(92, 14, 24, 32))
+                stage.setColorAt(1.00, QColor(148, 22, 34, 56))
+            painter.fillRect(stage_rect, stage)
+
+            white_index = 0
+            for item in self._white_rects:
+                if light_theme:
+                    alpha = 22 if white_index % 7 == 0 else 10
+                else:
+                    alpha = 16 if white_index % 7 == 0 else 7
+                y_fade = QLinearGradient(QPointF(0.0, 0.0), QPointF(0.0, key_top))
+                guide_color = QColor("#6E3542") if light_theme else QColor("#FFFFFF")
+                y_fade.setColorAt(0.00, _with_alpha(guide_color, 0))
+                y_fade.setColorAt(0.36, _with_alpha(guide_color, max(1, alpha // 3)))
+                y_fade.setColorAt(1.00, _with_alpha(guide_color, alpha))
+                painter.setPen(QPen(y_fade, 1))
+                x = item.rect.left()
+                painter.drawLine(QPointF(x, 0.0), QPointF(x, key_top))
+                white_index += 1
+            painter.setPen(Qt.NoPen)
+
+            vignette_w = max(self._sp(120), int(self.width() * 0.09))
+            edge_color = QColor("#9CA1AA") if light_theme else QColor(self._theme.app_bg)
+            edge_alpha = 118 if light_theme else 230
+            edge_mid_alpha = 20 if light_theme else 32
+            left_vignette = QLinearGradient(QPointF(0.0, 0.0), QPointF(float(vignette_w), 0.0))
+            left_vignette.setColorAt(0.00, _with_alpha(edge_color, edge_alpha))
+            left_vignette.setColorAt(0.72, _with_alpha(edge_color, edge_mid_alpha))
+            left_vignette.setColorAt(1.00, _with_alpha(edge_color, 0))
+            painter.fillRect(QRectF(0.0, 0.0, float(vignette_w), key_top), left_vignette)
+            right_vignette = QLinearGradient(QPointF(float(self.width() - vignette_w), 0.0), QPointF(float(self.width()), 0.0))
+            right_vignette.setColorAt(0.00, _with_alpha(edge_color, 0))
+            right_vignette.setColorAt(0.28, _with_alpha(edge_color, edge_mid_alpha))
+            right_vignette.setColorAt(1.00, _with_alpha(edge_color, edge_alpha))
+            painter.fillRect(QRectF(float(self.width() - vignette_w), 0.0, float(vignette_w), key_top), right_vignette)
+
+            top_vignette = QLinearGradient(QPointF(0.0, 0.0), QPointF(0.0, key_top))
+            top_vignette.setColorAt(0.00, _with_alpha(edge_color, 78 if light_theme else 210))
+            top_vignette.setColorAt(0.18, _with_alpha(edge_color, 18 if light_theme else 42))
+            top_vignette.setColorAt(1.00, _with_alpha(edge_color, 0))
+            painter.fillRect(stage_rect, top_vignette)
+
+            glow_rect = QRectF(
+                self._side_margin(),
+                key_top - self._sp(86),
+                max(1.0, self.width() - (self._side_margin() * 2)),
+                self._sp(92),
+            )
+            glow = QLinearGradient(glow_rect.topLeft(), glow_rect.bottomLeft())
+            glow.setColorAt(0.00, _with_alpha(base, 0))
+            glow.setColorAt(0.72, _with_alpha(base, 24 if light_theme else 34))
+            glow.setColorAt(1.00, _with_alpha(base.lighter(128), 62 if light_theme else 78))
+            painter.fillRect(glow_rect, glow)
+            fade_width = max(self._sp(44), int(self.width() * 0.035))
+            left_fade = QLinearGradient(QPointF(0.0, 0.0), QPointF(float(fade_width), 0.0))
+            left_fade.setColorAt(0.0, _with_alpha(edge_color, 138 if light_theme else 245))
+            left_fade.setColorAt(1.0, _with_alpha(edge_color, 0))
+            painter.fillRect(QRectF(0.0, 0.0, float(fade_width), key_top + self._sp(3)), left_fade)
+            right_fade = QLinearGradient(QPointF(float(self.width() - fade_width), 0.0), QPointF(float(self.width()), 0.0))
+            right_fade.setColorAt(0.0, _with_alpha(edge_color, 0))
+            right_fade.setColorAt(1.0, _with_alpha(edge_color, 138 if light_theme else 245))
+            painter.fillRect(QRectF(float(self.width() - fade_width), 0.0, float(fade_width), key_top + self._sp(3)), right_fade)
+
+            line_rect = QRectF(
+                float(self._side_margin()),
+                key_top - max(1, self._sp(1)),
+                max(1.0, self.width() - (self._side_margin() * 2)),
+                max(1.0, self._sp(2)),
+            )
+            line_gradient = QLinearGradient(line_rect.topLeft(), line_rect.topRight())
+            line_gradient.setColorAt(0.00, _with_alpha(base.lighter(135), 0))
+            line_gradient.setColorAt(0.05, _with_alpha(base.lighter(135), 52))
+            line_gradient.setColorAt(0.18, _with_alpha(base.lighter(135), 116))
+            line_gradient.setColorAt(0.82, _with_alpha(base.lighter(135), 116))
+            line_gradient.setColorAt(0.95, _with_alpha(base.lighter(135), 52))
+            line_gradient.setColorAt(1.00, _with_alpha(base.lighter(135), 0))
+            painter.fillRect(line_rect, line_gradient)
+            painter.setPen(Qt.NoPen)
+
+        for stream in [*self._released_effect_streams, *self._active_effect_streams.values()]:
+            release_t = 0.0
+            if stream.released_at is not None:
+                release_t = max(0.0, min(1.0, (now - stream.released_at) / max(0.001, stream.release_duration)))
+            alpha_scale = 1.0 if release_t < 0.82 else max(0.0, 1.0 - ((release_t - 0.82) / 0.18))
+            lift = stream.release_distance * release_t
+            height = stream.release_height if stream.released_at is not None else stream.height
+            rect = QRectF(
+                stream.x - (stream.width / 2.0),
+                stream.key_top - height - lift,
+                stream.width,
+                height,
+            )
+            if not rect.intersects(clip_f):
+                continue
+            shadow_rect = rect.adjusted(-self._sp(5), -self._sp(5), self._sp(5), self._sp(5))
+            shadow = QLinearGradient(shadow_rect.topLeft(), shadow_rect.bottomLeft())
+            shadow.setColorAt(0.00, _with_alpha(base, int(22 * alpha_scale)))
+            shadow.setColorAt(0.50, _with_alpha(base, int(78 * alpha_scale)))
+            shadow.setColorAt(1.00, _with_alpha(base, int(24 * alpha_scale)))
+            painter.fillPath(self._rounded_path(shadow_rect, float(self._sp(7))), shadow)
+
+            gradient = QLinearGradient(rect.bottomLeft(), rect.topLeft())
+            gradient.setColorAt(0.00, _with_alpha(base.darker(145), int(122 * alpha_scale)))
+            gradient.setColorAt(0.17, _with_alpha(base.darker(108), int(214 * alpha_scale)))
+            gradient.setColorAt(0.50, _with_alpha(base.lighter(132), int(246 * alpha_scale)))
+            gradient.setColorAt(0.82, _with_alpha(base, int(214 * alpha_scale)))
+            gradient.setColorAt(1.00, _with_alpha(base.darker(142), int(128 * alpha_scale)))
+            painter.fillPath(self._rounded_path(rect, float(self._sp(4))), gradient)
+            painter.setPen(QPen(_with_alpha(base.lighter(160), int(96 * alpha_scale)), max(1, self._sp(1))))
+            painter.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), self._sp(4), self._sp(4))
+            painter.setPen(Qt.NoPen)
+
+        for spark in self._effect_sparks:
+            t = max(0.0, min(1.0, (now - spark.started_at) / max(0.001, spark.duration)))
+            ease = 1.0 - ((1.0 - t) * (1.0 - t))
+            alpha = int(190 * (1.0 - t))
+            if alpha <= 0:
+                continue
+            x = spark.x + (spark.dx * ease)
+            y = spark.y + (spark.dy * ease)
+            size = max(1.0, spark.size * (1.0 - (t * 0.55)))
+            rect = QRectF(x - (size / 2.0), y - (size / 2.0), size, size)
+            if not rect.intersects(clip_f):
+                continue
+            painter.setBrush(_with_alpha(base.lighter(150), alpha))
+            painter.drawEllipse(rect)
+
+        painter.restore()
 
     def _paint_classic(self, painter: QPainter, clip_f: QRectF) -> None:
         white_outline = QColor(self._theme.border)
@@ -737,7 +1133,7 @@ class PianoWidget(QWidget):
             super().leaveEvent(event)
             return
         if self._mouse_pressed:
+            self._mouse_pressed = False
             self._last_drag_note = None
             self.dragNoteChanged.emit(None)
         super().leaveEvent(event)
-

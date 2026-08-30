@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import importlib
+import os
+import tempfile
 import time
 import wave
 from array import array
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Event
 
 from openpiano.core.fluidsynth_loader import ensure_fluidsynth_loaded
 
@@ -94,6 +97,7 @@ class MidiRecorder:
         preset: int = 0,
         master_volume: float = 1.0,
         sample_rate: int = DEFAULT_RENDER_SAMPLE_RATE,
+        stop_event: Event | None = None,
     ) -> None:
         destination = Path(path)
         suffix = destination.suffix.lower()
@@ -106,21 +110,41 @@ class MidiRecorder:
         if not events:
             raise RuntimeError("No recording data available.")
 
-        if suffix in MIDI_EXPORT_EXTENSIONS:
-            self._save_midi(destination, events)
-            return
-        if suffix in WAV_EXPORT_EXTENSIONS:
-            self._save_wav(
-                destination=destination,
-                events=events,
-                soundfont_path=soundfont_path,
-                bank=bank,
-                preset=preset,
-                master_volume=master_volume,
-                sample_rate=sample_rate,
-            )
-            return
-        raise RuntimeError("Unsupported recording format. Use .mid or .wav.")
+        if suffix not in MIDI_EXPORT_EXTENSIONS | WAV_EXPORT_EXTENSIONS:
+            raise RuntimeError("Unsupported recording format. Use .mid or .wav.")
+
+        self._ensure_export_not_stopped(stop_event)
+        temp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                dir=str(destination.parent),
+                prefix=f".{destination.stem}.",
+                suffix=destination.suffix,
+                delete=False,
+            ) as handle:
+                temp_path = Path(handle.name)
+            if suffix in MIDI_EXPORT_EXTENSIONS:
+                self._save_midi(temp_path, events)
+            else:
+                self._save_wav(
+                    destination=temp_path,
+                    events=events,
+                    soundfont_path=soundfont_path,
+                    bank=bank,
+                    preset=preset,
+                    master_volume=master_volume,
+                    sample_rate=sample_rate,
+                    stop_event=stop_event,
+                )
+            self._ensure_export_not_stopped(stop_event)
+            os.replace(temp_path, destination)
+            temp_path = None
+        finally:
+            if temp_path is not None:
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
 
     def _save_midi(self, destination: Path, events: list[_MidiEvent]) -> None:
         if self._mido_module is None:
@@ -161,6 +185,7 @@ class MidiRecorder:
         preset: int,
         master_volume: float,
         sample_rate: int,
+        stop_event: Event | None,
     ) -> None:
         sf_path = Path(soundfont_path) if soundfont_path is not None else None
         if sf_path is None or not sf_path.exists():
@@ -186,12 +211,14 @@ class MidiRecorder:
 
                 current_time = 0.0
                 for event in events:
+                    self._ensure_export_not_stopped(stop_event)
                     event_time = max(current_time, float(event.at_seconds))
                     self._render_wav_segment(
                         synth=synth,
                         wav_out=wav_out,
                         duration_seconds=event_time - current_time,
                         sample_rate=render_sample_rate,
+                        stop_event=stop_event,
                     )
                     if event.kind == "note_on":
                         synth.noteon(0, int(event.note), int(event.velocity))
@@ -204,6 +231,7 @@ class MidiRecorder:
                     wav_out=wav_out,
                     duration_seconds=DEFAULT_RENDER_TAIL_SECONDS,
                     sample_rate=render_sample_rate,
+                    stop_event=stop_event,
                 )
         finally:
             if sfid is not None:
@@ -223,13 +251,20 @@ class MidiRecorder:
         wav_out: wave.Wave_write,
         duration_seconds: float,
         sample_rate: int,
+        stop_event: Event | None,
     ) -> None:
         total_frames = max(0, int(round(float(duration_seconds) * max(8000, int(sample_rate)))))
         remaining = total_frames
         while remaining > 0:
+            MidiRecorder._ensure_export_not_stopped(stop_event)
             chunk = min(4096, remaining)
             wav_out.writeframesraw(MidiRecorder._samples_to_pcm16_bytes(synth.get_samples(int(chunk))))
             remaining -= chunk
+
+    @staticmethod
+    def _ensure_export_not_stopped(stop_event: Event | None) -> None:
+        if stop_event is not None and stop_event.is_set():
+            raise InterruptedError("Recording export cancelled.")
 
     @staticmethod
     def _samples_to_pcm16_bytes(samples) -> bytes:

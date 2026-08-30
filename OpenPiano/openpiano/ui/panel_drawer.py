@@ -40,15 +40,6 @@ class PanelDrawerState:
     def controls_visible(self) -> bool:
         return self._controls_visible
 
-    def set_active(self, active: ActivePanel) -> bool:
-        target = self._normalize(active)
-        previous = self.active
-        self._settings_visible = target in {"settings", "both"}
-        self._controls_visible = target in {"controls", "both"}
-        if target == previous:
-            return False
-        return True
-
     def set_settings_visible(self, visible: bool) -> bool:
         target = bool(visible)
         if target == self._settings_visible:

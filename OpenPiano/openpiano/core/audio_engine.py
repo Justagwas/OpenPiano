@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import sys
 from pathlib import Path
 from typing import Protocol
@@ -16,6 +17,7 @@ from openpiano.core.program_selection import normalize_program_selection
 
 AUDIO_SAMPLE_RATE = 44100
 DEFAULT_AUDIO_POLYPHONY = 128
+_PROGRAM_CACHE_LIMIT = 16
 
 
 class AudioEngineProtocol(Protocol):
@@ -33,6 +35,9 @@ class AudioEngineProtocol(Protocol):
         ...
 
     def set_instrument(self, soundfont_path: str, bank: int = 0, preset: int = 0) -> None:
+        ...
+
+    def select_program(self, bank: int = 0, preset: int = 0) -> None:
         ...
 
     def get_available_programs(self) -> dict[int, list[int]]:
@@ -71,6 +76,9 @@ class SilentAudioEngine:
         return
 
     def set_instrument(self, soundfont_path: str, bank: int = 0, preset: int = 0) -> None:
+        return
+
+    def select_program(self, bank: int = 0, preset: int = 0) -> None:
         return
 
     def get_available_programs(self) -> dict[int, list[int]]:
@@ -129,6 +137,11 @@ class FluidSynthAudioEngine:
         self._output_driver = self._default_output_driver()
         self._available_programs: dict[int, list[int]] = {}
         self._available_program_names: dict[int, dict[int, str]] = {}
+        self._program_cache: dict[
+            tuple[str, int, int],
+            tuple[dict[int, list[int]], dict[int, dict[int, str]]],
+        ] = {}
+        self._loaded_soundfont_key: tuple[str, int, int] | None = None
         self._active_notes: set[int] = set()
         self._create_synth()
         self._output_driver = self._start_synth(self._output_driver)
@@ -144,13 +157,17 @@ class FluidSynthAudioEngine:
     def get_output_driver(self) -> str:
         return self._output_driver
 
-    def _create_synth(self) -> None:
-        self._synth = self._fluidsynth_module.Synth(samplerate=float(self.sample_rate))
-        if hasattr(self._synth, "setting"):
+    def _new_synth(self):
+        synth = self._fluidsynth_module.Synth(samplerate=float(self.sample_rate))
+        if hasattr(synth, "setting"):
             try:
-                self._synth.setting("synth.polyphony", int(self.polyphony))
+                synth.setting("synth.polyphony", int(self.polyphony))
             except Exception:
                 pass
+        return synth
+
+    def _create_synth(self) -> None:
+        self._synth = self._new_synth()
 
     def _start_driver_attempts(self, preferred_driver: str | None) -> list[dict[str, str]]:
         attempts: list[dict[str, str]] = []
@@ -228,21 +245,40 @@ class FluidSynthAudioEngine:
         self._set_gain(clamped)
 
     def set_instrument(self, soundfont_path: str, bank: int = 0, preset: int = 0) -> None:
-        sf_path = Path(soundfont_path)
-        if not sf_path.exists():
+        sf_path = Path(soundfont_path).expanduser()
+        if not sf_path.is_file():
             raise FileNotFoundError(f"SoundFont not found: {sf_path}")
+        sf_path = sf_path.resolve()
 
         target_bank = self._clamp_bank(int(bank))
         target_preset = self._clamp_preset(int(preset))
+        cache_key = self._soundfont_cache_key(sf_path)
+        if (
+            self._sfid is not None
+            and self._soundfont_path == str(sf_path)
+            and self._loaded_soundfont_key == cache_key
+        ):
+            self.select_program(target_bank, target_preset)
+            return
 
         new_sfid: int | None = None
         old_sfid = self._sfid
         try:
             new_sfid = int(self._sfload(str(sf_path)))
-            available_programs, available_program_names = self._discover_available_programs(
-                new_sfid,
-                preferred_bank=target_bank,
-            )
+            cached = self._program_cache.get(cache_key)
+            if cached is None:
+                available_programs, available_program_names = self._discover_available_programs(
+                    new_sfid,
+                    preferred_bank=target_bank,
+                )
+                self._cache_program_metadata(
+                    cache_key,
+                    available_programs,
+                    available_program_names,
+                )
+            else:
+                available_programs = self._copy_programs(cached[0])
+                available_program_names = self._copy_program_names(cached[1])
             selected_bank, selected_preset = normalize_program_selection(
                 available_programs,
                 target_bank,
@@ -260,6 +296,7 @@ class FluidSynthAudioEngine:
         self.all_notes_off()
         self._sfid = new_sfid
         self._soundfont_path = str(sf_path)
+        self._loaded_soundfont_key = cache_key
         self._bank = selected_bank
         self._preset = selected_preset
         self._available_programs = available_programs
@@ -269,6 +306,29 @@ class FluidSynthAudioEngine:
                 self._sfunload(old_sfid)
             except Exception:
                 pass
+
+    def select_program(self, bank: int = 0, preset: int = 0) -> None:
+        if self._sfid is None:
+            raise RuntimeError("No SoundFont is currently loaded.")
+        selected_bank, selected_preset = normalize_program_selection(
+            self._available_programs,
+            self._clamp_bank(int(bank)),
+            self._clamp_preset(int(preset)),
+        )
+        if (selected_bank, selected_preset) == (self._bank, self._preset):
+            return
+        self.all_notes_off()
+        result = self._synth.program_select(0, self._sfid, selected_bank, selected_preset)
+        if result is not None:
+            try:
+                if int(result) < 0:
+                    raise RuntimeError(
+                        f"FluidSynth could not select bank {selected_bank}, preset {selected_preset}."
+                    )
+            except (TypeError, ValueError):
+                pass
+        self._bank = selected_bank
+        self._preset = selected_preset
 
     def note_on(self, midi_note: int, velocity: int = 100) -> None:
         if self._sfid is None:
@@ -312,42 +372,205 @@ class FluidSynthAudioEngine:
         if target == self._output_driver:
             return
 
-        soundfont_path = self._soundfont_path
-        bank = self._bank
-        preset = self._preset
-        master_volume = self.master_volume
-
-        self.all_notes_off()
+        old_synth = self._synth
+        old_output_driver = self._output_driver
+        old_sfid = self._sfid
+        old_soundfont_path = self._soundfont_path
+        old_loaded_soundfont_key = self._loaded_soundfont_key
+        old_bank = self._bank
+        old_preset = self._preset
+        old_programs = self._available_programs
+        old_program_names = self._available_program_names
+        old_active_notes = set(self._active_notes)
+        candidate = self._new_synth()
         try:
-            self._synth.delete()
+            self._synth = candidate
+            self._sfid = None
+            self._soundfont_path = None
+            self._loaded_soundfont_key = None
+            self._available_programs = {}
+            self._available_program_names = {}
+            self._active_notes = set()
+            candidate_driver = self._start_synth(target)
+            self._set_gain(self.master_volume)
+            if old_soundfont_path and Path(old_soundfont_path).is_file():
+                self.set_instrument(old_soundfont_path, bank=old_bank, preset=old_preset)
+        except Exception:
+            try:
+                candidate.delete()
+            except Exception:
+                pass
+            self._synth = old_synth
+            self._output_driver = old_output_driver
+            self._sfid = old_sfid
+            self._soundfont_path = old_soundfont_path
+            self._loaded_soundfont_key = old_loaded_soundfont_key
+            self._bank = old_bank
+            self._preset = old_preset
+            self._available_programs = old_programs
+            self._available_program_names = old_program_names
+            self._active_notes = old_active_notes
+            raise
+
+        for note in old_active_notes:
+            try:
+                old_synth.noteoff(0, note)
+            except Exception:
+                pass
+        try:
+            if old_sfid is not None:
+                try:
+                    old_synth.sfunload(old_sfid, update_midi_preset=False)
+                except TypeError:
+                    old_synth.sfunload(old_sfid)
         except Exception:
             pass
+        try:
+            old_synth.delete()
+        except Exception:
+            pass
+        self._output_driver = candidate_driver
 
-        self._create_synth()
-        self._output_driver = self._start_synth(target)
-        self._set_gain(master_volume)
-        self._active_notes.clear()
-        self._sfid = None
-        self._available_programs = {}
-        self._available_program_names = {}
+    @staticmethod
+    def _copy_programs(programs: dict[int, list[int]]) -> dict[int, list[int]]:
+        return {int(bank): list(presets) for bank, presets in programs.items()}
 
-        if soundfont_path and Path(soundfont_path).exists():
-            self.set_instrument(soundfont_path, bank=bank, preset=preset)
-        self.set_master_volume(master_volume)
+    @staticmethod
+    def _copy_program_names(names: dict[int, dict[int, str]]) -> dict[int, dict[int, str]]:
+        return {
+            int(bank): {int(preset): str(name) for preset, name in preset_names.items()}
+            for bank, preset_names in names.items()
+        }
+
+    @staticmethod
+    def _soundfont_cache_key(path: Path) -> tuple[str, int, int]:
+        stat = path.stat()
+        return str(path), int(stat.st_size), int(stat.st_mtime_ns)
+
+    def _cache_program_metadata(
+        self,
+        cache_key: tuple[str, int, int],
+        programs: dict[int, list[int]],
+        names: dict[int, dict[int, str]],
+    ) -> None:
+        # A replaced file at the same path supersedes its old metadata. Keeping
+        # one entry per path also prevents repeated in-place edits from growing
+        # the cache indefinitely.
+        path_key = cache_key[0]
+        stale_keys = [
+            key
+            for key in self._program_cache
+            if key[0] == path_key and key != cache_key
+        ]
+        for stale_key in stale_keys:
+            self._program_cache.pop(stale_key, None)
+        self._program_cache[cache_key] = (
+            self._copy_programs(programs),
+            self._copy_program_names(names),
+        )
+        while len(self._program_cache) > _PROGRAM_CACHE_LIMIT:
+            oldest_key = next(iter(self._program_cache))
+            self._program_cache.pop(oldest_key, None)
+
+    def _bind_fluidsynth_function(self, name: str, result_type, *arguments):
+        existing = getattr(self._fluidsynth_module, name, None)
+        if callable(existing):
+            return existing
+        binder = getattr(self._fluidsynth_module, "cfunc", None)
+        if not callable(binder):
+            return None
+        try:
+            return binder(name, result_type, *arguments)
+        except Exception:
+            return None
+
+    def _discover_programs_by_iteration(
+        self,
+        sfid: int,
+    ) -> tuple[dict[int, list[int]], dict[int, dict[int, str]]] | None:
+        get_sfont = self._bind_fluidsynth_function(
+            "fluid_synth_get_sfont_by_id",
+            ctypes.c_void_p,
+            ("synth", ctypes.c_void_p, 1),
+            ("id", ctypes.c_int, 1),
+        )
+        iteration_start = self._bind_fluidsynth_function(
+            "fluid_sfont_iteration_start",
+            None,
+            ("sfont", ctypes.c_void_p, 1),
+        )
+        iteration_next = self._bind_fluidsynth_function(
+            "fluid_sfont_iteration_next",
+            ctypes.c_void_p,
+            ("sfont", ctypes.c_void_p, 1),
+        )
+        get_bank = self._bind_fluidsynth_function(
+            "fluid_preset_get_banknum",
+            ctypes.c_int,
+            ("preset", ctypes.c_void_p, 1),
+        )
+        get_number = self._bind_fluidsynth_function(
+            "fluid_preset_get_num",
+            ctypes.c_int,
+            ("preset", ctypes.c_void_p, 1),
+        )
+        get_name = self._bind_fluidsynth_function(
+            "fluid_preset_get_name",
+            ctypes.c_char_p,
+            ("preset", ctypes.c_void_p, 1),
+        )
+        if not all(callable(item) for item in (get_sfont, iteration_start, iteration_next, get_bank, get_number)):
+            return None
+        synth_pointer = getattr(self._synth, "synth", None)
+        if synth_pointer is None:
+            return None
+        try:
+            sfont = get_sfont(synth_pointer, sfid)
+            if not sfont:
+                return None
+            iteration_start(sfont)
+            programs: dict[int, list[int]] = {}
+            names: dict[int, dict[int, str]] = {}
+            for _ in range(65536):
+                preset_pointer = iteration_next(sfont)
+                if not preset_pointer:
+                    break
+                bank = self._clamp_bank(int(get_bank(preset_pointer)))
+                preset = self._clamp_preset(int(get_number(preset_pointer)))
+                programs.setdefault(bank, []).append(preset)
+                if callable(get_name):
+                    raw_name = get_name(preset_pointer)
+                    if isinstance(raw_name, bytes):
+                        label = raw_name.decode("latin-1", errors="replace").strip()
+                    else:
+                        label = str(raw_name or "").strip()
+                    if label:
+                        names.setdefault(bank, {})[preset] = label
+            else:
+                return None
+            if not programs:
+                return None
+            return programs, names
+        except Exception:
+            return None
 
     def _discover_available_programs(
         self,
         sfid: int,
         preferred_bank: int = 0,
     ) -> tuple[dict[int, list[int]], dict[int, dict[int, str]]]:
+        iterated = self._discover_programs_by_iteration(sfid)
+        if iterated is not None:
+            available, names = iterated
+            return self._normalize_discovered_programs(available, names)
+
         available: dict[int, list[int]] = {}
         names: dict[int, dict[int, str]] = {}
         preferred_bank = self._clamp_bank(int(preferred_bank))
         max_bank = max(255, min(16383, preferred_bank + 64))
         empty_bank_run = 0
         found_any = False
-
-        for bank in range(0, max_bank + 1):
+        for bank in range(max_bank + 1):
             presets, preset_names = self._discover_bank_presets(sfid, bank)
             if presets:
                 available[bank] = presets
@@ -359,14 +582,13 @@ class FluidSynthAudioEngine:
                 empty_bank_run += 1
             if found_any and bank >= max(preferred_bank, 127) and empty_bank_run >= 64:
                 break
+        return self._normalize_discovered_programs(available, names)
 
-        if preferred_bank not in available:
-            preferred_presets, preferred_names = self._discover_bank_presets(sfid, preferred_bank)
-            if preferred_presets:
-                available[preferred_bank] = preferred_presets
-                if preferred_names:
-                    names[preferred_bank] = preferred_names
-
+    @staticmethod
+    def _normalize_discovered_programs(
+        available: dict[int, list[int]],
+        names: dict[int, dict[int, str]],
+    ) -> tuple[dict[int, list[int]], dict[int, dict[int, str]]]:
         normalized_programs: dict[int, list[int]] = {}
         normalized_names: dict[int, dict[int, str]] = {}
         for bank, presets in available.items():
@@ -465,6 +687,7 @@ class FluidSynthAudioEngine:
                 self._sfunload(self._sfid)
                 self._sfid = None
             self._soundfont_path = None
+            self._loaded_soundfont_key = None
             self._available_programs = {}
             self._available_program_names = {}
         except Exception:
