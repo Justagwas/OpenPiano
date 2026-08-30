@@ -13,7 +13,7 @@
     width="128"
     height="128"
     alt="OpenPiano Logo"
-    src="https://github.com/user-attachments/assets/dc0be90d-30fe-40c0-9dd1-a0415daa777f"
+    src="https://github.com/user-attachments/assets/4d8bc03f-1b03-4bc2-b35b-cfa183f427df"
   />
 </p>
 
@@ -85,7 +85,7 @@ The piano display, instrument sound, sustain, and recorder follow the same perfo
 
 ### Choose your sound
 
-OpenPiano includes a compact piano sound so you can begin immediately. A richer Grand Piano sound can be added from inside the application, and compatible SF2 or SF3 files can provide additional instruments.
+OpenPiano includes both its compact default piano and a richer Grand Piano sound, so you can begin immediately. Optionally, you can add your own Soundfont.
 
 Use the Controls panel to select an instrument and adjust the playing experience without leaving the main piano.
 
