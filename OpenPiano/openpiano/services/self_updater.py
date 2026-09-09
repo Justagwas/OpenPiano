@@ -555,7 +555,7 @@ class SelfUpdater:
             raise RuntimeError("Downloaded setup installer was not found.")
         mode_arg = self._installer_mode_arg()
         installer_args = [
-            "/SILENT",
+            "/VERYSILENT",
             "/SP-",
             "/SUPPRESSMSGBOXES",
             "/NORESTART",

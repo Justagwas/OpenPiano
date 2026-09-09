@@ -13,7 +13,7 @@
     width="128"
     height="128"
     alt="OpenPiano Logo"
-    src="https://github.com/user-attachments/assets/4d8bc03f-1b03-4bc2-b35b-cfa183f427df"
+    src="OpenPiano/icon.ico"
   />
 </p>
 

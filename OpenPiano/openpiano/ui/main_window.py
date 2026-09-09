@@ -197,7 +197,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(root)
 
         outer = QVBoxLayout(root)
-        outer.setContentsMargins(14, 14, 14, 10)
+        outer.setContentsMargins(14, 14, 14, self._sp(6))
         outer.setSpacing(10)
         self._outer_layout = outer
 
@@ -496,12 +496,12 @@ class MainWindow(QMainWindow):
 
         updates_row = QHBoxLayout()
         self._configure_settings_row(updates_row)
-        self.auto_updates_checkbox = QCheckBox("Automatic Update", self.interface_card)
+        self.auto_updates_checkbox = QCheckBox("Automatic updates", self.interface_card)
         self.auto_updates_checkbox.setObjectName("settingCheckbox")
         self.auto_updates_checkbox.setChecked(True)
         self.auto_updates_checkbox.toggled.connect(self.autoCheckUpdatesChanged.emit)
         updates_row.addWidget(self.auto_updates_checkbox)
-        self.check_updates_button = QPushButton("Check for Updates now", self.interface_card)
+        self.check_updates_button = QPushButton("Check for updates now", self.interface_card)
         self.check_updates_button.setObjectName("actionButton")
         self.check_updates_button.clicked.connect(self.checkUpdatesNowRequested.emit)
         updates_row.addWidget(self.check_updates_button)
@@ -641,6 +641,14 @@ class MainWindow(QMainWindow):
         configure_controls_row(row, self._sp)
 
     def _refresh_scaled_layout_metrics(self) -> None:
+        if not self._effects_layout_active:
+            margins = self._outer_layout.contentsMargins()
+            self._outer_layout.setContentsMargins(
+                margins.left(),
+                margins.top(),
+                margins.right(),
+                self._sp(6),
+            )
         controls_outer = self.controls_body.layout()
         if isinstance(controls_outer, QVBoxLayout):
             controls_outer.setSpacing(self._sp(8))
@@ -709,7 +717,7 @@ class MainWindow(QMainWindow):
         self.save_recording_button.setMaximumHeight(controls_row_height)
         footer_layout = getattr(self, "_footer_layout", None)
         if isinstance(footer_layout, QHBoxLayout):
-            footer_layout.setContentsMargins(self._sp(6), self._sp(2), self._sp(6), self._sp(2))
+            footer_layout.setContentsMargins(self._sp(2), 0, self._sp(2), 0)
             footer_layout.setSpacing(self._sp(8))
         if hasattr(self, "theme_toggle_button"):
             icon_px = max(18, self._sp(FOOTER_ICON_SIZE - 2))
@@ -777,6 +785,22 @@ class MainWindow(QMainWindow):
             checkbox.setStyle(style)
             self._checkbox_styles.append(style)
 
+    def _apply_update_checkbox_styles(self, dialog: QWidget) -> None:
+        styles: list[SquareCheckBoxStyle] = []
+        size = max(18, min(40, self._sp(24)))
+        radius = max(3, int(round(size / 5)))
+        for checkbox in dialog.findChildren(QCheckBox):
+            style = SquareCheckBoxStyle(
+                border_color=self.theme.border,
+                fill_color=self.theme.accent,
+                check_color=self.theme.text_primary,
+                size=size,
+                radius=radius,
+            )
+            checkbox.setStyle(style)
+            styles.append(style)
+        dialog._update_checkbox_styles = styles
+
     def _refresh_checkbox_style_colors(self) -> None:
         size = max(18, min(40, self._sp(24)))
         radius = max(3, int(round(size / 5)))
@@ -794,7 +818,7 @@ class MainWindow(QMainWindow):
         self.footer_bar = QFrame(self.centralWidget())
         self.footer_bar.setObjectName("footerBar")
         row = QHBoxLayout(self.footer_bar)
-        row.setContentsMargins(self._sp(6), self._sp(2), self._sp(6), self._sp(2))
+        row.setContentsMargins(self._sp(2), 0, self._sp(2), 0)
         row.setSpacing(self._sp(8))
         self._footer_layout = row
 
@@ -846,17 +870,17 @@ class MainWindow(QMainWindow):
         version_label.setObjectName("footerVersion")
         version_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
-        row.addWidget(self.theme_toggle_button)
-        row.addWidget(self.pin_toggle_button)
-        row.addWidget(self.settings_toggle_button)
-        row.addWidget(self.stats_toggle_button)
-        row.addWidget(self.controls_toggle_button)
+        row.addWidget(self.theme_toggle_button, 0, Qt.AlignLeft)
+        row.addWidget(self.pin_toggle_button, 0, Qt.AlignLeft)
+        row.addWidget(self.settings_toggle_button, 0, Qt.AlignLeft)
+        row.addWidget(self.stats_toggle_button, 0, Qt.AlignLeft)
+        row.addWidget(self.controls_toggle_button, 0, Qt.AlignLeft)
         row.addStretch(1)
-        row.addWidget(self.website_button)
-        row.addWidget(self.tutorial_button)
-        row.addWidget(version_label)
+        row.addWidget(self.website_button, 0, Qt.AlignRight)
+        row.addWidget(self.tutorial_button, 0, Qt.AlignRight)
+        row.addWidget(version_label, 0, Qt.AlignRight)
 
-        outer.addWidget(self.footer_bar)
+        outer.addWidget(self.footer_bar, 0)
 
     def _build_theme_icon(self, mode: str) -> QIcon:
         if not hasattr(self, "theme_toggle_button"):
@@ -1496,7 +1520,7 @@ class MainWindow(QMainWindow):
                 self._outer_layout.removeWidget(widget)
             for index, widget in enumerate(normal_widgets, start=1):
                 self._outer_layout.insertWidget(index, widget)
-            self._outer_layout.addWidget(self.footer_bar)
+            self._outer_layout.addWidget(self.footer_bar, 0)
             self._effects_panels_detached = False
             self.stats_bar.setProperty("effectsPopup", False)
             self.controls_scroll.setProperty("effectsPopup", False)
@@ -1665,7 +1689,7 @@ class MainWindow(QMainWindow):
             self._position_effects_overlays()
             return
 
-        self._outer_layout.setContentsMargins(14, 14, 14, 10)
+        self._outer_layout.setContentsMargins(14, 14, 14, self._sp(6))
         self._outer_layout.setSpacing(10)
         self._outer_layout.setAlignment(self.piano_widget, Qt.AlignHCenter)
         self.piano_widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
@@ -2105,6 +2129,7 @@ class MainWindow(QMainWindow):
         later_button.clicked.connect(dialog.reject)
         continue_button.clicked.connect(dialog.accept)
 
+        self._apply_update_checkbox_styles(dialog)
         apply_dialog_button_cursors_util(dialog)
         self._apply_windows_title_bar_theme(dialog)
         accepted = dialog.exec() == QDialog.Accepted
@@ -2173,6 +2198,7 @@ class MainWindow(QMainWindow):
         abort_button.clicked.connect(dialog.reject)
         continue_button.clicked.connect(dialog.accept)
 
+        self._apply_update_checkbox_styles(dialog)
         apply_dialog_button_cursors_util(dialog)
         self._apply_windows_title_bar_theme(dialog)
         accepted = dialog.exec() == QDialog.Accepted
