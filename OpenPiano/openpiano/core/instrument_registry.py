@@ -129,21 +129,19 @@ def _is_grand_piano_builtin(item: InstrumentInfo) -> bool:
     return _is_grand_piano(item)
 
 
-def _pinned_soundfont_priority(item: InstrumentInfo) -> int:
+def _pinned_soundfont_priority(item: InstrumentInfo) -> tuple[int, int]:
     suffix = item.path.suffix.lower()
+    format_priority = {".sf3": 0, ".sf2": 1}.get(suffix, 2)
     if _is_default_builtin(item):
-        if suffix == ".sf3":
-            return 0
-        if suffix == ".sf2":
-            return 2
-        return 4
+        return 0, format_priority
     if _is_grand_piano(item):
-        if suffix == ".sf3":
-            return 1
-        if suffix == ".sf2":
-            return 3
-        return 5
-    return 6
+        return 1, format_priority
+    normalized = _normalize_builtin_name(item.path.stem)
+    if normalized == "steinwayd274hifi":
+        return 2, format_priority
+    if normalized == "steinwayd274concert":
+        return 3, format_priority
+    return 4, 0
 
 
 def discover_instruments() -> list[InstrumentInfo]:

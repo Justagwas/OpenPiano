@@ -89,6 +89,8 @@ OpenPiano includes both its compact default piano and a richer Grand Piano sound
 
 Use the Controls panel to select an instrument and adjust the playing experience without leaving the main piano.
 
+The included soundfonts use calibrated preset levels to reduce volume jumps while preserving touch response. 100% is the standard level; the range up to 200% provides additional gain and can engage overload protection during louder playing. WAV export uses the same preset levels.
+
 ### Keep the performance
 
 Save a take as MIDI when you want to edit its notes later. Choose WAV when you want an audio file that already sounds the way it did in OpenPiano.

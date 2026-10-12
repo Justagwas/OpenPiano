@@ -73,10 +73,12 @@ class UpdateCheckService:
         prepared: PreparedUpdateInstall,
         *,
         restart_after_update: bool,
+        stop_event: Event | None = None,
     ) -> None:
         self._updater.launch_prepared_update(
             prepared,
             restart_after_update=bool(restart_after_update),
+            stop_event=stop_event,
         )
 
     def discard_prepared_update(self, prepared: PreparedUpdateInstall) -> None:

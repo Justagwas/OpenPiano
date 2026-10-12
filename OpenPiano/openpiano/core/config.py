@@ -6,9 +6,10 @@ from typing import Literal, cast
 from openpiano.core.normalize import clamp_float, quantize_step
 
 APP_NAME = "OpenPiano"
-APP_VERSION = "1.3.0"
+APP_VERSION = "2.0.0"
 INNO_SETUP_APP_ID = "OpenPianoJustagwas"
 OFFICIAL_WEBSITE_URL = "https://www.justagwas.com/projects/openpiano"
+DONATE_PAGE_URL = "https://www.justagwas.com/donate"
 
 UPDATE_CHECK_MANIFEST_URL = "https://www.justagwas.com/projects/openpiano/latest.json"
 UPDATE_CHECK_SETUP_URL = "https://downloads.justagwas.com/openpiano/OpenPianoSetup.exe"
@@ -17,8 +18,10 @@ DEFAULT_THEME_MODE: Literal["dark", "light"] = "dark"
 PianoStyle = Literal["premium", "classic", "effects"]
 DEFAULT_PIANO_STYLE: PianoStyle = "premium"
 PIANO_STYLES: tuple[PianoStyle, ...] = ("premium", "classic", "effects")
-DEFAULT_MASTER_VOLUME = 0.60
+DEFAULT_MASTER_VOLUME = 1.0
+MASTER_VOLUME_MAX = 2.0
 DEFAULT_NOTE_VELOCITY = 100
+DEFAULT_AUDIO_POLYPHONY = 256
 
 TRANSPOSE_MIN = -21
 TRANSPOSE_MAX = 21

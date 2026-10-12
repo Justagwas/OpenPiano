@@ -487,8 +487,6 @@ class PianoWidget(QWidget):
         left = float(self._side_margin())
 
         if self._piano_style == "effects":
-            # Scale the keyboard to the fullscreen stage while retaining a
-            # small inset so the outer keys are not pressed against the display.
             available_width = max(1.0, float(self.width()) - (left * 2.0))
             total_gaps = gap * max(0, self._white_note_count - 1)
             white_w = max(1.0, (available_width - total_gaps) / max(1, self._white_note_count))

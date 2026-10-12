@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QStyleOptionComboBox,
     QStyleOptionSlider,
     QStyleOptionViewItem,
+    QStylePainter,
     QStyledItemDelegate,
     QWidget,
 )
@@ -297,6 +298,8 @@ class ChevronComboBox(QComboBox):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._loading = False
+        self._description_before_loading = ''
         self._arrow_idle = QColor("#B7B7BC")
         self._arrow_active = QColor("#F4F4F5")
         self._mouse_popup_pending = False
@@ -318,6 +321,16 @@ class ChevronComboBox(QComboBox):
         self._arrow_active = QColor(active)
         self.update()
 
+    def set_loading(self, loading: bool) -> None:
+        loading = bool(loading)
+        if loading == self._loading:
+            return
+        if loading:
+            self._description_before_loading = self.accessibleDescription()
+        self._loading = loading
+        self.setAccessibleDescription('Loading...' if loading else self._description_before_loading)
+        self.update()
+
     def set_popup_colors(self, *, accent: str, text: str, panel: str, hover: str) -> None:
         self._popup_delegate.set_colors(accent=accent, text=text, panel=panel, hover=hover)
         view = self.view()
@@ -334,7 +347,20 @@ class ChevronComboBox(QComboBox):
             view.viewport().update()
 
     def paintEvent(self, event) -> None:
-        super().paintEvent(event)
+        if self._loading:
+            loading_painter = QStylePainter(self)
+            loading_option = QStyleOptionComboBox()
+            self.initStyleOption(loading_option)
+            loading_option.currentText = 'Loading...'
+            loading_painter.drawComplexControl(QStyle.CC_ComboBox, loading_option)
+            text_rect = self.style().subControlRect(
+                QStyle.CC_ComboBox, loading_option, QStyle.SC_ComboBoxEditField, self)
+            self.style().drawItemText(loading_painter, text_rect,
+                Qt.AlignVCenter | Qt.AlignLeading, loading_option.palette,
+                self.isEnabled(), 'Loading...', QPalette.ButtonText)
+            loading_painter.end()
+        else:
+            super().paintEvent(event)
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
 
@@ -385,7 +411,7 @@ class ChevronComboBox(QComboBox):
         if was_open:
             self.popupClosed.emit()
         if restore_focus is not None:
-            QTimer.singleShot(0, lambda widget=restore_focus: self._restore_mouse_popup_focus(widget))
+            QTimer.singleShot(0, self, lambda widget=restore_focus: self._restore_mouse_popup_focus(widget))
 
     @staticmethod
     def _restore_mouse_popup_focus(widget: QWidget) -> None:
@@ -416,7 +442,7 @@ class ChevronComboBox(QComboBox):
         if not self._mouse_popup_pending:
             self._mouse_press_focus = None
             return super().mousePressEvent(event)
-        self._mouse_press_focus = QApplication.focusWidget()
+        self._mouse_press_focus = getattr(self.window(), 'piano_widget', QApplication.focusWidget())
         event.accept()
         self.update()
 
@@ -436,6 +462,6 @@ class ChevronComboBox(QComboBox):
         event.accept()
         self.update()
         if should_open:
-            QTimer.singleShot(0, self._show_mouse_requested_popup)
+            QTimer.singleShot(0, self, self._show_mouse_requested_popup)
         else:
             self._mouse_press_focus = None

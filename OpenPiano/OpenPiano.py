@@ -92,6 +92,7 @@ def main() -> int:
         )
         return 0
 
+    controller = None
     try:
         controller = PianoAppController(app, icon_path=icon_path)
         controller.run()
@@ -101,6 +102,9 @@ def main() -> int:
             app.quit()
             return 130
     finally:
+        if controller is not None:
+            controller.shutdown()
+            controller.wait_for_audio_shutdown()
         instance_guard.release()
 
 

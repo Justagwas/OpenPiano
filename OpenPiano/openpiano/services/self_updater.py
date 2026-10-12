@@ -15,10 +15,12 @@ from typing import Callable
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
+from openpiano.core.file_reads import open_guarded_read
+
 try:
-    import winreg  # type: ignore[attr-defined]
-except Exception:  # pragma: no cover - non-Windows
-    winreg = None  # type: ignore[assignment]
+    import winreg
+except Exception:
+    winreg = None
 
 _SEMVER_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -183,12 +185,19 @@ def _emit_progress(progress_callback: ProgressCallback | None, percent: int, mes
     progress_callback(clamped, str(message or ""))
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedUpdateVerification:
+    sha256: str
+    size: int
+
+
 @dataclass(slots=True)
 class PreparedUpdateInstall:
     latest_version: str
     setup_path: Path
     staging_root: Path
     requires_elevation: bool = False
+    verification: PreparedUpdateVerification | None = None
 
 
 class SelfUpdater:
@@ -302,6 +311,7 @@ class SelfUpdater:
             setup_path=setup_path,
             staging_root=target_root,
             requires_elevation=(mode_arg == "/ALLUSERS"),
+            verification=PreparedUpdateVerification(check_data.setup_sha256.lower(), check_data.setup_size),
         )
 
     def launch_prepared_update(
@@ -309,12 +319,30 @@ class SelfUpdater:
         prepared: PreparedUpdateInstall,
         *,
         restart_after_update: bool,
+        stop_event: Event | None = None,
     ) -> None:
         try:
-            self._launch_installer(
-                prepared.setup_path,
-                restart_after_update=bool(restart_after_update),
-            )
+            _ensure_not_stopped(stop_event)
+            verification = prepared.verification
+            if verification is None or verification.size <= 0 or not _SHA256_RE.fullmatch(verification.sha256):
+                raise RuntimeError('Prepared installer has no valid verification metadata.')
+            with open_guarded_read(prepared.setup_path) as handle:
+                if os.fstat(handle.fileno()).st_size != verification.size:
+                    raise RuntimeError('Prepared installer size changed before launch.')
+                digest = hashlib.sha256()
+                while True:
+                    _ensure_not_stopped(stop_event)
+                    chunk = handle.read(256 * 1024)
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+                if digest.hexdigest() != verification.sha256:
+                    raise RuntimeError('Prepared installer SHA256 changed before launch.')
+                _ensure_not_stopped(stop_event)
+                self._launch_installer(
+                    prepared.setup_path,
+                    restart_after_update=bool(restart_after_update),
+                )
         except Exception:
             self.discard_prepared_update(prepared)
             raise
@@ -512,9 +540,11 @@ class SelfUpdater:
                     with tmp_path.open("wb") as handle:
                         while True:
                             _ensure_not_stopped(stop_event)
-                            chunk = response.read(256 * 1024)
+                            chunk = response.read(min(256 * 1024, expected_size - downloaded + 1))
                             if not chunk:
                                 break
+                            if len(chunk) > expected_size - downloaded:
+                                raise RuntimeError('Downloaded installer exceeds its declared size.')
                             handle.write(chunk)
                             downloaded += len(chunk)
                             if expected_size > 0:
@@ -584,7 +614,7 @@ class SelfUpdater:
 
     def _launch_installer_elevated(self, setup_path: Path, installer_args: list[str]) -> None:
         try:
-            import ctypes  # type: ignore[import-not-found]
+            import ctypes
         except Exception as exc:
             raise RuntimeError(
                 "Unable to request administrator privileges for all-users update."
@@ -595,7 +625,7 @@ class SelfUpdater:
         show_normal = 1
         try:
             result = int(
-                ctypes.windll.shell32.ShellExecuteW(  # type: ignore[attr-defined]
+                ctypes.windll.shell32.ShellExecuteW(
                     None,
                     operation,
                     str(setup_path),
@@ -812,7 +842,7 @@ class SelfUpdater:
         access: int,
     ) -> dict[str, str] | None:
         try:
-            with winreg.OpenKey(hive, key_path, 0, access) as key:  # type: ignore[arg-type,union-attr]
+            with winreg.OpenKey(hive, key_path, 0, access) as key:
                 return {
                     "InstallLocation": self._read_registry_string(key, "InstallLocation"),
                     "AppPath": self._read_registry_string(key, "Inno Setup: App Path"),
@@ -825,7 +855,7 @@ class SelfUpdater:
     @staticmethod
     def _read_registry_string(key: object, name: str) -> str:
         try:
-            value, _ = winreg.QueryValueEx(key, name)  # type: ignore[union-attr]
+            value, _ = winreg.QueryValueEx(key, name)
         except OSError:
             return ""
         return str(value or "").strip()

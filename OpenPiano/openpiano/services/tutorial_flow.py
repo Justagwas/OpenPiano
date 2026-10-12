@@ -33,17 +33,18 @@ class TutorialFlowService:
                 "title": "Stats Bar",
                 "body": "Live values show volume, sustain state, Keys Per Second, held notes, polyphony, and transpose.",
                 "target": "stats",
+                "show_stats": True,
             },
             {
                 "id": "footer",
                 "title": "Footer Actions",
-                "body": "Use footer links to open settings, controls, hide stats, open the official website, or relaunch this tutorial from the right side.",
+                "body": "The left icons change theme, pin the window, and toggle Settings, Controls, and Stats. Crimson icons indicate visible panels. Website, Tutorial, and Donate are on the right.",
                 "target": "footer",
             },
             {
                 "id": "controls_toggle",
                 "title": "Controls Toggle",
-                "body": "Use Controls for frequent actions like changing Instrument (soundfonts), MIDI In, quick note mute, and recording.",
+                "body": "Use the sliders icon to show or hide Controls for instrument selection, MIDI input, muting notes, and recording.",
                 "target": "controls_toggle",
             },
             {
@@ -105,8 +106,8 @@ class TutorialFlowService:
                 "id": "soundfont_folder",
                 "title": "Custom SoundFonts",
                 "body": "To use your own soundfonts, place .sf2 or .sf3 files in this folder:\n{soundfonts_dir}",
-                "target": "sound_section",
-                "open_settings": True,
+                "target": "controls_instrument",
+                "open_controls": True,
             },
             {
                 "id": "keyboard_section",

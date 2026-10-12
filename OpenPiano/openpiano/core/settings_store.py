@@ -31,6 +31,7 @@ from openpiano.core.config import (
 )
 from openpiano.core.keymap import MIDI_END_88, MIDI_START_88, PianoMode, binding_from_id, binding_to_id
 from openpiano.core.normalize import clamp_float, clamp_int
+from openpiano.core.audio_levels import normalize_volume
 
 SETTINGS_FILE_NAME = "OpenPiano_config.json"
 ThemeMode = Literal["dark", "light"]
@@ -135,7 +136,7 @@ def _clamp_mode(value: Any) -> PianoMode:
 
 
 def _clamp_volume(value: Any) -> float:
-    return clamp_float(value, 0.0, 1.0, default=DEFAULT_MASTER_VOLUME)
+    return normalize_volume(value)
 
 
 def _clamp_bool(value: Any, default: bool) -> bool:
@@ -203,7 +204,7 @@ def _clamp_optional_window_position(value: Any) -> int | None:
         return None
     try:
         parsed = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     return max(-100000, min(100000, parsed))
 
@@ -358,10 +359,10 @@ def save_settings(settings: AppSettings, path: Path | None = None) -> None:
             suffix=".tmp",
             delete=False,
         ) as handle:
+            temp_path = Path(handle.name)
             handle.write(raw)
             handle.flush()
             os.fsync(handle.fileno())
-            temp_path = Path(handle.name)
         os.replace(temp_path, file_path)
     except Exception as exc:
         if temp_path is not None:

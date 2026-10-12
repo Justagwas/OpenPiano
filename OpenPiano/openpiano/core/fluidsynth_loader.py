@@ -4,6 +4,7 @@ import ctypes.util
 import importlib
 import os
 import sys
+import threading
 from pathlib import Path
 
 from openpiano.core.runtime_paths import executable_dir, project_root
@@ -11,6 +12,7 @@ from openpiano.core.runtime_paths import executable_dir, project_root
 _fluidsynth_module: object | None = None
 _fluidsynth_error: Exception | None = None
 _dll_dir_handles: dict[str, object] = {}
+_initialization_lock = threading.RLock()
 
 
 def candidate_dll_dirs() -> list[Path]:
@@ -51,6 +53,11 @@ def _find_local_fluidsynth_dll() -> Path | None:
 
 
 def configure_dll_search_paths() -> list[Path]:
+    with _initialization_lock:
+        return _configure_dll_search_paths()
+
+
+def _configure_dll_search_paths() -> list[Path]:
     if sys.platform != "win32":
         return []
 
@@ -116,6 +123,11 @@ def _import_fluidsynth_module() -> tuple[object | None, Exception | None]:
 
 
 def ensure_fluidsynth_loaded() -> tuple[object | None, Exception | None]:
+    with _initialization_lock:
+        return _ensure_fluidsynth_loaded()
+
+
+def _ensure_fluidsynth_loaded() -> tuple[object | None, Exception | None]:
     global _fluidsynth_module
     global _fluidsynth_error
 

@@ -665,7 +665,6 @@ def _localized_label_for_scancode(scan_code: int, *, fallback: str) -> str:
         get_layout.restype = ctypes.c_void_p
 
         hkl = get_layout(0)
-        # MAPVK_VSC_TO_VK_EX = 3
         vk = int(map_vk(scan, 3, hkl))
         if vk <= 0:
             return fallback_text

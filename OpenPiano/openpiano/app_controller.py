@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import threading
 import time
+import math
 from collections import deque
 from pathlib import Path
 from typing import Callable
@@ -12,10 +13,13 @@ from PySide6.QtGui import QDesktopServices, QKeyEvent, QMouseEvent
 from PySide6.QtWidgets import QApplication, QFileDialog
 
 from openpiano.core.audio_engine import AudioEngineProtocol, FluidSynthAudioEngine, SilentAudioEngine
+from openpiano.core.audio_levels import normalize_volume
+from openpiano.core.preset_families import default_program_selection
 from openpiano.core.config import (
     ANIMATION_PROFILE,
     APP_NAME,
     APP_VERSION,
+    DONATE_PAGE_URL,
     NOTE_VELOCITY_MAX,
     NOTE_VELOCITY_MIN,
     KPS_WINDOW_SECONDS,
@@ -56,8 +60,9 @@ from openpiano.core.keybind_remap import (
     translate_keybind_map,
 )
 from openpiano.core.music_logic import clamp_transposed_note
-from openpiano.core.midi_input import MidiInputManager
+from openpiano.core.midi_input import MidiInputEvent, MidiInputManager
 from openpiano.core.midi_recording import MidiRecorder
+from openpiano.core.piano_pedal import PedalState
 from openpiano.core.object_tree import is_descendant_of
 from openpiano.core.program_selection import normalize_available_programs, normalize_program_selection
 from openpiano.core.runtime_paths import icon_path_candidates
@@ -71,6 +76,8 @@ from openpiano.core.stats_logic import collect_stats_values, trim_kps_events
 from openpiano.core.theme import apply_key_color_overrides, get_theme
 from openpiano.services.midi_routing import MidiRoutingService
 from openpiano.services.note_lifecycle import NoteLifecycleService
+from openpiano.services.audio_session import AudioSession
+from openpiano.services.piano_download import PianoDownloadService, d274_download_spec
 from openpiano.services.recording_export import (
     destination_with_selected_suffix,
     is_wav_destination,
@@ -93,14 +100,19 @@ RecorderFactory = Callable[[], MidiRecorder]
 
 
 class PianoAppController(QObject):
+    _midiEventReady = Signal(object)
     _updateResultReady = Signal(bool, object)
     _updateInstallReady = Signal(object)
     _updateInstallProgressReady = Signal(int, str)
     _updateInstallHandoffRequested = Signal(object)
-    _midiNoteOnReady = Signal(int, int)
-    _midiNoteOffReady = Signal(int)
+    _midiNoteOnReady = Signal(int, int, int, float)
+    _midiNoteOffReady = Signal(int, int, float)
+    _midiPedalReady = Signal(int, int, float)
+    _midiDisconnectedReady = Signal(int, int)
     _midiDropdownRefreshReady = Signal(object)
     _recordingSaveReady = Signal(object)
+    _pianoDownloadProgressReady = Signal(int, int)
+    _pianoDownloadReady = Signal(object)
 
     def __init__(
         self,
@@ -120,6 +132,13 @@ class PianoAppController(QObject):
         self._recorder_factory = recorder_factory or MidiRecorder
         self._settings_path = settings_path
         self._is_shutdown = False
+        self._piano_download_spec = d274_download_spec()
+        self._piano_download_thread: threading.Thread | None = None
+        self._piano_download_stop = threading.Event()
+        self._piano_download_active = False
+        self._piano_download_installed = False
+        self._pianoDownloadProgressReady.connect(self._on_piano_download_progress, Qt.ConnectionType.QueuedConnection)
+        self._pianoDownloadReady.connect(self._finish_piano_download, Qt.ConnectionType.QueuedConnection)
         self._settings_save_error_shown = False
 
         settings = load_settings(self._settings_path)
@@ -155,6 +174,13 @@ class PianoAppController(QObject):
         self._keyboard_input_mode = settings.keyboard_input_mode
         self._keyboard_layout_choice_seen = bool(settings.keyboard_layout_choice_seen)
         self._space_override_off = False
+        self._pedal_state = PedalState()
+        self._midi_input_epoch = 0
+        self._midi_sequence_cutoff = 0
+        self._midi_pedal_values: dict[int, int] = {}
+        self._audio_handoff = False
+        self._mouse_button_bindings: dict[int, Binding] = {}
+        self._ignore_mouse_until_release = False
         self._sustain_gate_percent = 0.0 if self._is_sustain_temporarily_off() else 100.0
         self._default_keybind_map_full = build_default_keybind_map_full(self._keyboard_input_mode)
         self._custom_keybind_overrides = deserialize_custom_keybind_payload(settings.custom_keybinds)
@@ -197,12 +223,17 @@ class PianoAppController(QObject):
         self._tutorial_index = 0
         self._tutorial_prev_settings_open = False
         self._tutorial_prev_controls_open = False
+        self._tutorial_prev_stats_visible = self._show_stats
         self._tutorial_prev_mode: PianoMode = self._mode
         self._tutorial_flow = TutorialFlowService()
 
         self.audio_engine: AudioEngineProtocol = SilentAudioEngine()
         self.audio_available = False
         self._audio_startup_error = ""
+        self._audio_error_reported = False
+        self._audio_failure_count = 0
+        self._audio_request = None
+        self._startup_fallback_attempted = False
         self._update_lock = threading.Lock()
         self._update_stop_event = threading.Event()
         self._update_check_active = False
@@ -215,17 +246,30 @@ class PianoAppController(QObject):
         self._updateInstallProgressReady.connect(self._on_background_progress)
         self._updateInstallHandoffRequested.connect(self._on_update_install_handoff_requested)
         self._midiNoteOnReady.connect(self._on_midi_note_on)
+        self._midiEventReady.connect(self._on_midi_event, Qt.ConnectionType.QueuedConnection)
         self._midiNoteOffReady.connect(self._on_midi_note_off)
+        self._midiPedalReady.connect(self._on_midi_pedal)
+        self._midiDisconnectedReady.connect(self._on_midi_disconnected)
         self._midiDropdownRefreshReady.connect(self._finish_midi_dropdown_refresh)
         self._recordingSaveReady.connect(self._finish_recording_save)
 
         self._midi_manager = self._midi_manager_factory(self._queue_midi_note_on, self._queue_midi_note_off)
+        event_callback = getattr(self._midi_manager, 'set_event_callback', None)
+        if callable(event_callback):
+            event_callback(self._midiEventReady.emit)
+        pedal_callback = getattr(self._midi_manager, 'set_pedal_callback', None)
+        if callable(pedal_callback):
+            pedal_callback(self._queue_midi_pedal)
+        disconnect_callback = getattr(self._midi_manager, 'set_disconnect_callback', None)
+        if callable(disconnect_callback):
+            disconnect_callback(lambda generation: self._midiDisconnectedReady.emit(self._midi_input_epoch, generation))
         self._midi_routing = MidiRoutingService(self._midi_manager)
         self._midi_dropdown_refresh_active = False
         self._midi_dropdown_refresh_id = 0
         self._recorder = self._recorder_factory()
         self._recording_save_active = False
         self._recording_save_stop_event = threading.Event()
+        self._recording_save_thread = None
         self._recording_started_at = 0.0
         self._recording_elapsed_seconds = 0
         self._update_service = UpdateCheckService(
@@ -271,8 +315,16 @@ class PianoAppController(QObject):
         self._sustain_timer = QTimer(self)
         self._sustain_timer.setInterval(SUSTAIN_TICK_MS)
         self._sustain_timer.timeout.connect(self._on_sustain_tick)
+        self._sustain_deadline_timer = QTimer(self)
+        self._sustain_deadline_timer.setSingleShot(True)
+        self._sustain_deadline_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._sustain_deadline_timer.timeout.connect(self._expire_sustain_notes)
+        self._audio_health_timer = QTimer(self)
+        self._audio_health_timer.setInterval(1000)
+        self._audio_health_timer.timeout.connect(self._poll_audio_health)
 
         self._connect_signals()
+        self.window.set_piano_download_state(available=self._piano_download_spec is not None)
         self._apply_mode(self._mode, persist=False)
         self._apply_ui_state_to_window()
         self.window.set_recording_elapsed(0)
@@ -296,6 +348,7 @@ class PianoAppController(QObject):
         self.window.instrumentChanged.connect(self._on_instrument_changed)
         self.window.bankChanged.connect(self._on_bank_changed)
         self.window.presetChanged.connect(self._on_preset_changed)
+        self.window.programChanged.connect(self._on_program_changed)
         self.window.volumeChanged.connect(self._on_volume_changed)
         self.window.velocityChanged.connect(self._on_velocity_changed)
         self.window.transposeChanged.connect(self._on_transpose_changed)
@@ -330,7 +383,10 @@ class PianoAppController(QObject):
         self.window.tutorialSkipRequested.connect(lambda: self._end_tutorial(completed=False))
         self.window.tutorialFinishRequested.connect(lambda: self._end_tutorial(completed=True))
         self.window.websiteRequested.connect(self._on_website_requested)
+        self.window.donateRequested.connect(self._on_donate_requested)
         self.window.resetDefaultsRequested.connect(self._on_reset_defaults_requested)
+        self.window.pianoDownloadRequested.connect(self._on_piano_download_requested)
+        self.window.pianoDownloadCanceled.connect(self._cancel_piano_download)
         self.window.resetKeyColorsRequested.connect(self._on_reset_key_colors_requested)
         self.window.updateProgressCanceled.connect(self._on_update_progress_canceled)
 
@@ -378,15 +434,224 @@ class PianoAppController(QObject):
         self.window.piano_widget.set_label_visibility(show_key_labels, self._show_note_labels)
 
     def _init_audio_engine(self) -> None:
+        factory = (lambda: FluidSynthAudioEngine(start_output=False)) if self._audio_factory is FluidSynthAudioEngine else self._audio_factory
+        self._audio_session = AudioSession(factory, self.audio_engine, self)
+        self._audio_session.prepared.connect(self._on_audio_prepared, Qt.ConnectionType.QueuedConnection)
+        self._audio_session.activated.connect(self._on_audio_activated, Qt.ConnectionType.QueuedConnection)
+        self._audio_session.failed.connect(self._on_audio_preparation_failed, Qt.ConnectionType.QueuedConnection)
+        self._audio_health_timer.start()
+
+    def _on_audio_prepared(self, result) -> None:
+        if self._is_shutdown or not self._audio_session.is_latest(result.request):
+            return
+        self._stop_all_notes(preserve_pedal=True)
+        self._ignore_mouse_until_release = self.window.piano_widget._mouse_pressed
+        self._audio_handoff = True
+        if not self._audio_session.accept(result):
+            self._audio_handoff = False
+
+    def _on_audio_activated(self, result) -> None:
+        if self._is_shutdown:
+            return
+        self.audio_engine = result.engine
+        snapshot = getattr(self._midi_manager, 'input_snapshot', None)
+        if callable(snapshot):
+            _, sequence, pedals = snapshot()
+            if not pedals and self._pedal_state.controls_damping:
+                self._reset_midi_input()
+            self._midi_sequence_cutoff = sequence
+            self._midi_pedal_values = pedals
+            if pedals:
+                self._pedal_state.set_midi(max(pedals.values()))
+        self._audio_handoff = False
         try:
-            self.audio_engine = self._audio_factory()
+            self._apply_desired_volume()
+            self._sync_pedal_event('panic')
+            self._instrument_id = result.request.instrument_id
+            self._instrument_bank, self._instrument_preset = self.audio_engine.get_current_program()
+            self._available_programs = normalize_available_programs(self.audio_engine.get_available_programs())
+            self._available_program_names = self._read_available_program_names(self._available_programs)
             self.audio_available = not isinstance(self.audio_engine, SilentAudioEngine)
-            self.audio_engine.set_master_volume(self._volume)
-            self._audio_startup_error = ""
+            self._audio_error_reported = False
+            self._audio_failure_count = getattr(self.audio_engine, 'failure_count', lambda: 0)()
+            self._audio_startup_error = ''
+            self.window.set_instruments(self._instruments, self._instrument_id)
+            self._refresh_program_controls()
+            if self._audio_session.is_latest(result.request):
+                self._audio_request = None
+                self.window.set_audio_loading('')
+                if result.request.persist:
+                    self._schedule_persist()
+            self._refresh_stats_ui()
         except Exception as exc:
+            self._report_audio_error(exc)
+        finally:
+            self._audio_session.acknowledge()
+
+    def _on_audio_preparation_failed(self, result) -> None:
+        if result.terminal:
+            if self._is_shutdown:
+                return
+            self._audio_handoff = True
             self.audio_engine = SilentAudioEngine()
+            self._stop_all_notes(preserve_pedal=True)
             self.audio_available = False
-            self._audio_startup_error = str(exc).strip() or f"{type(exc).__name__}: {exc}"
+            self._audio_error_reported = True
+            self._audio_request = None
+            self._audio_health_timer.stop()
+            self.window.set_audio_loading('')
+            self.window.set_instruments(self._instruments, self._instrument_id)
+            self._audio_session.close()
+            self.window.show_warning('Audio Error', f'Audio cleanup failed. Please restart OpenPiano.\n{result.error}')
+            return
+        if self._is_shutdown or not self._audio_session.is_latest(result.request):
+            return
+        self._audio_handoff = False
+        self._audio_request = None
+        self.window.set_audio_loading('')
+        self.window.set_instruments(self._instruments, self._instrument_id)
+        if result.request.startup and not self._startup_fallback_attempted:
+            self._startup_fallback_attempted = True
+            fallback = select_fallback_instrument(self._instruments)
+            if fallback is not None and fallback.id != result.request.instrument_id:
+                self._apply_instrument_selection(fallback.id, fallback.default_bank, fallback.default_preset,
+                    persist=False, startup=True)
+                return
+        if result.request.retry or result.request.startup:
+            self._audio_error_reported = False
+            self._report_audio_error(result.error)
+        else:
+            self.window.show_warning('Instrument Error', f'Failed to load instrument:\n{result.error}')
+
+    def _poll_audio_health(self) -> None:
+        if self._is_shutdown or self._audio_handoff or self._audio_error_reported:
+            return
+        try:
+            count = getattr(self.audio_engine, 'failure_count', lambda: 0)()
+            if count > self._audio_failure_count:
+                self._report_audio_error(RuntimeError('The audio renderer reported a failed block.'))
+            self._audio_failure_count = count
+        except Exception as exc:
+            self._report_audio_error(exc)
+
+    def _report_audio_error(self, error) -> None:
+        if self._is_shutdown or self._audio_error_reported:
+            return
+        self._audio_error_reported = True
+        QTimer.singleShot(0, lambda: self._handle_audio_error(str(error)))
+
+    def _handle_audio_error(self, detail: str) -> None:
+        if self._is_shutdown or self._audio_session.terminal_error is not None:
+            return
+        self._stop_all_notes(preserve_pedal=True)
+        self.audio_available = False
+        self._audio_handoff = True
+        if self.window.ask_audio_retry(detail):
+            self._retry_audio()
+
+    def _retry_audio(self) -> None:
+        if self._is_shutdown or self._audio_session.terminal_error is not None:
+            return
+        if not self._audio_handoff:
+            self._stop_all_notes(preserve_pedal=True)
+        self._audio_handoff = True
+        instrument = self._instrument_by_id.get(self._instrument_id)
+        if instrument is None or not callable(getattr(self.audio_engine, 'restart_output', None)):
+            fallback = instrument or select_fallback_instrument(self._instruments)
+            if fallback is not None:
+                self._apply_instrument_selection(fallback.id, fallback.default_bank, fallback.default_preset,
+                    persist=False, startup=True)
+            return
+        self._audio_request = self._audio_session.request(instrument.id, str(instrument.path),
+            self._instrument_bank, self._instrument_preset, self._volume, retry=True)
+        self.window.set_audio_loading(instrument.name)
+
+    def wait_for_audio_shutdown(self, timeout=None) -> bool:
+        started = time.monotonic()
+        if not self._audio_session.wait_closed(timeout):
+            return False
+        for worker in (self._recording_save_thread, self._piano_download_thread):
+            if worker is not None and worker is not threading.current_thread():
+                remaining = None if timeout is None else max(0.0, timeout - (time.monotonic() - started))
+                worker.join(remaining)
+                if worker.is_alive():
+                    return False
+        return True
+
+    def _on_piano_download_requested(self) -> None:
+        if self._is_shutdown or self._piano_download_active or self._piano_download_installed:
+            return
+        if self._piano_download_spec is None:
+            return
+        if self._piano_download_thread is not None:
+            self._piano_download_thread.join()
+        self._piano_download_stop = threading.Event()
+        self._piano_download_active = True
+        self.window.set_piano_download_state(
+            available=True, busy=True, status="Connecting to the piano download…", progress_percent=0,
+        )
+        self._piano_download_thread = threading.Thread(
+            target=self._piano_download_worker, name="OpenPiano-PianoDownload", daemon=False,
+        )
+        try:
+            self._piano_download_thread.start()
+        except Exception as exc:
+            self._piano_download_thread = None
+            self._finish_piano_download({"error": str(exc)})
+
+    def _piano_download_worker(self) -> None:
+        try:
+            service = PianoDownloadService(self._piano_download_spec, localappdata_fonts_dir())
+            last_percent = -1
+
+            def progress(received: int, total: int) -> None:
+                nonlocal last_percent
+                percent = received * 100 // total
+                if percent != last_percent:
+                    last_percent = percent
+                    self._pianoDownloadProgressReady.emit(received, total)
+
+            path = service.download(self._piano_download_stop, progress)
+            result = {"path": path}
+        except InterruptedError:
+            result = {"cancelled": True}
+        except Exception as exc:
+            result = {"cancelled": True} if self._piano_download_stop.is_set() else {"error": str(exc)}
+        self._pianoDownloadReady.emit(result)
+
+    def _on_piano_download_progress(self, received: int, total: int) -> None:
+        if self._is_shutdown or not self._piano_download_active or self._piano_download_stop.is_set():
+            return
+        status = ("Verifying the piano download…" if received == total else
+                  f"Downloading: {received / 1_000_000:.1f} / {total / 1_000_000:.1f} MB ({received * 100 // total}%)")
+        self.window.set_piano_download_state(
+            available=True, busy=True, status=status, progress_percent=received * 100 // total,
+        )
+
+    def _cancel_piano_download(self) -> None:
+        if self._is_shutdown or not self._piano_download_active:
+            return
+        self._piano_download_stop.set()
+        self.window.set_piano_download_state(
+            available=True, busy=True, cancelling=True, status="Cancelling the piano download…",
+        )
+
+    def _finish_piano_download(self, result: dict) -> None:
+        if self._is_shutdown or not self._piano_download_active:
+            return
+        self._piano_download_active = False
+        if "path" in result:
+            self._piano_download_installed = True
+            self._refresh_instruments()
+            status = "Downloaded and imported. Select Steinway D-274 Hi-Fi in the Instrument list."
+        elif result.get("cancelled"):
+            status = "Download cancelled. You can try again when ready."
+        else:
+            status = "Download failed. Check your connection and available disk space, then try again."
+            self.window.show_warning("Piano Download Failed", f"{status}\n\n{result.get('error', '')}")
+        self.window.set_piano_download_state(
+            available=self._piano_download_spec is not None, status=status, installed=self._piano_download_installed,
+        )
 
     def _refresh_midi_inputs(self) -> None:
         self._midi_routing.refresh_inputs(
@@ -470,6 +735,8 @@ class PianoAppController(QObject):
                 selected = requested_preferred
             else:
                 try:
+                    self._midi_manager.close()
+                    self._reset_midi_input()
                     self._midi_manager.open_device(requested_preferred)
                     selected = requested_preferred
                 except Exception:
@@ -490,22 +757,130 @@ class PianoAppController(QObject):
             self._schedule_persist()
 
     def _queue_midi_note_on(self, note: int, velocity: int) -> None:
-        self._midiNoteOnReady.emit(int(note), int(velocity))
+        self._midiNoteOnReady.emit(int(note), int(velocity), self._midi_input_epoch, time.monotonic())
 
     def _queue_midi_note_off(self, note: int) -> None:
-        self._midiNoteOffReady.emit(int(note))
+        self._midiNoteOffReady.emit(int(note), self._midi_input_epoch, time.monotonic())
 
-    def _on_midi_note_on(self, note: int, velocity: int) -> None:
-        if self._tutorial_active:
+    def _queue_midi_pedal(self, value: int) -> None:
+        self._midiPedalReady.emit(int(value), self._midi_input_epoch, time.monotonic())
+
+    def _on_midi_event(self, event: MidiInputEvent) -> None:
+        if self._is_shutdown or event.generation != self._midi_manager.input_generation():
+            return
+        if event.sequence <= self._midi_sequence_cutoff or self._tutorial_active:
+            return
+        source = f'midi:{event.generation}:{event.channel}:{event.note}'
+        if event.kind == 'note_on':
+            if not self._audio_handoff:
+                self._activate_external_source(event.note, source, event.value, timestamp=event.timestamp)
+        elif event.kind == 'note_off':
+            self._release_source(source, timestamp=event.timestamp)
+        elif event.kind == 'control_change':
+            if event.note in (64, 121):
+                self._midi_pedal_values[event.channel] = event.value if event.note == 64 else 0
+                value = max(self._midi_pedal_values.values(), default=0)
+                if self._audio_handoff:
+                    self._pedal_state.set_midi(value)
+                else:
+                    self._on_midi_pedal(value, timestamp=event.timestamp)
+            elif event.note == 123:
+                prefix = f'midi:{event.generation}:{event.channel}:'
+                for owned in tuple(self._source_to_sounding_note):
+                    if owned.startswith(prefix):
+                        self._release_source(owned, timestamp=event.timestamp)
+            elif event.note == 120:
+                prefix = f'midi:{event.generation}:{event.channel}:'
+                for owned in tuple(self._source_to_sounding_note):
+                    if owned.startswith(prefix):
+                        self._source_to_sounding_note.pop(owned)
+                self._note_lifecycle.discard_sources(lambda source: source.startswith(prefix),
+                    stop_note=lambda note: self._stop_note(note, timestamp=event.timestamp),
+                    set_pressed=self.window.piano_widget.set_pressed)
+                self._update_sustain_timer_state()
+                self._mark_stats_dirty()
+
+    def _on_midi_note_on(self, note: int, velocity: int, epoch: int | None = None,
+                         timestamp: float | None = None) -> None:
+        if self._tutorial_active or (epoch is not None and epoch != self._midi_input_epoch):
             return
         source = f"midi:{int(note)}"
-        self._activate_external_source(int(note), source, int(velocity))
+        self._activate_external_source(int(note), source, int(velocity), timestamp=timestamp)
 
-    def _on_midi_note_off(self, note: int) -> None:
-        if self._tutorial_active:
+    def _on_midi_note_off(self, note: int, epoch: int | None = None,
+                          timestamp: float | None = None) -> None:
+        if self._tutorial_active or (epoch is not None and epoch != self._midi_input_epoch):
             return
         source = f"midi:{int(note)}"
-        self._release_source(source)
+        self._release_source(source, timestamp=timestamp)
+
+    def _on_midi_pedal(self, value: int, epoch: int | None = None,
+                       timestamp: float | None = None) -> None:
+        if self._tutorial_active or (epoch is not None and epoch != self._midi_input_epoch):
+            return
+        self._pedal_state.set_midi(value)
+        self._sync_pedal_event('midi', value, timestamp=timestamp)
+        self._refresh_sustain_deadlines(timestamp=timestamp)
+        self._mark_stats_dirty()
+
+    def _sync_pedal_event(self, source: str, input_value: int | None = None, *,
+                          timestamp: float | None = None) -> None:
+        pedal = self._pedal_state
+        pedal.space_down = self._hold_space_for_sustain and self._space_override_off
+        value = pedal.value if pedal.controls_damping else (
+            127 if self._sustain_percent > 0 and not self._is_sustain_temporarily_off() else 0)
+        setter = getattr(self.audio_engine, 'set_pedal', None)
+        recapture_owned = pedal.controls_damping or pedal.space_down
+        if callable(setter) and not getattr(self, '_audio_handoff', False):
+            try:
+                if getattr(self.audio_engine, 'piano_recapture_enabled', False):
+                    setter(value, recapture_owned=recapture_owned, emit_contacts=source != 'panic')
+                else:
+                    setter(value)
+            except Exception as exc:
+                self._report_audio_error(exc)
+        self._recorder.add_pedal(value, controls_damping=pedal.controls_damping,
+            source=source, input_value=value if input_value is None else input_value,
+            timestamp=timestamp, recapture_owned=recapture_owned)
+
+    def _reset_midi_input(self) -> None:
+        self._midi_input_epoch += 1
+        self._midi_sequence_cutoff = 0
+        self._midi_pedal_values = {}
+        midi_owned_pedal = self._pedal_state.controls_damping
+        if midi_owned_pedal:
+            self._pedal_state.set_midi(0)
+            self._sync_pedal_event('disconnect', 0)
+        space_owns_pedal = self._hold_space_for_sustain and self._space_override_off
+        if midi_owned_pedal and not space_owns_pedal:
+            self._release_all_sustained()
+        for source in list(self._source_to_sounding_note):
+            if source.startswith('midi:'):
+                self._source_to_sounding_note.pop(source)
+        self._note_lifecycle.discard_sources(lambda source: source.startswith('midi:'),
+            stop_note=self._stop_note, set_pressed=self.window.piano_widget.set_pressed)
+        if space_owns_pedal and self._pedal_state.controls_damping:
+            self._pedal_state.restore_automatic_after_space = True
+        else:
+            self._pedal_state.reset()
+        self._sync_pedal_event('disconnect', 0)
+        if midi_owned_pedal:
+            self._refresh_sustain_deadlines()
+        else:
+            self._update_sustain_timer_state()
+        self._mark_stats_dirty()
+
+    def _on_midi_disconnected(self, epoch: int, generation: int) -> None:
+        if self._is_shutdown:
+            return
+        current_generation = getattr(self._midi_manager, 'input_generation', None)
+        if callable(current_generation):
+            if generation != current_generation():
+                return
+        elif epoch != self._midi_input_epoch:
+            return
+        self._midi_manager.close()
+        self._reset_midi_input()
 
     def _refresh_instruments(self) -> None:
         try:
@@ -530,6 +905,7 @@ class PianoAppController(QObject):
                 self._instrument_bank,
                 self._instrument_preset,
                 persist=False,
+                startup=True,
             ):
                 return
 
@@ -545,6 +921,7 @@ class PianoAppController(QObject):
             fallback.default_bank,
             fallback.default_preset,
             persist=False,
+            startup=True,
         )
 
     def _refresh_program_controls(self) -> None:
@@ -580,6 +957,8 @@ class PianoAppController(QObject):
                 selected_bank,
                 selected_preset,
                 preset_names=preset_names or {},
+                family_programs=(self._available_programs if self._instrument_id == "builtin:default.sf3" else None),
+                family_names=self._available_program_names,
             )
         except TypeError:
             self.window.set_bank_preset_options(banks, presets, selected_bank, selected_preset)
@@ -628,38 +1007,25 @@ class PianoAppController(QObject):
         bank: int,
         preset: int,
         persist: bool,
+        startup: bool = False,
     ) -> bool:
+        if self._is_shutdown or self._audio_session.terminal_error is not None:
+            return False
         instrument = self._instrument_by_id.get(instrument_id)
         if instrument is None:
             return False
-        try:
-            self.audio_engine.set_instrument(str(instrument.path), bank=bank, preset=preset)
-            programs = self.audio_engine.get_available_programs()
-            current_bank, current_preset = self.audio_engine.get_current_program()
-        except Exception as exc:
-            self.window.show_warning(
-                "Instrument Error",
-                f"Failed to load instrument:\n{exc}",
-            )
-            return False
-
-        normalized_bank, normalized_preset = normalize_program_selection(
-            programs=programs,
-            requested_bank=current_bank,
-            requested_preset=current_preset,
-        )
-        self._instrument_id = instrument.id
-        self._instrument_bank = normalized_bank
-        self._instrument_preset = normalized_preset
-        self._available_programs = normalize_available_programs(programs)
-        self._available_program_names = self._read_available_program_names(self._available_programs)
-        self.window.set_instruments(self._instruments, self._instrument_id)
-        self._refresh_program_controls()
-        if persist:
-            self._schedule_persist()
-        return True
+        if instrument.id == "builtin:default.sf3":
+            bank, preset = default_program_selection(bank, preset)
+        self._audio_request = self._audio_session.request(instrument.id, str(instrument.path), bank, preset,
+            self._volume, persist=persist, startup=startup)
+        self.window.set_audio_loading(instrument.name)
+        return self._audio_request is not None
 
     def _apply_program_selection(self, bank: int, preset: int, persist: bool) -> bool:
+        if self._audio_request is not None or self._audio_handoff:
+            return False
+        if self._instrument_id == "builtin:default.sf3":
+            bank, preset = default_program_selection(bank, preset)
         if not self._instrument_id:
             self._instrument_bank = max(0, min(16383, int(bank)))
             self._instrument_preset = max(0, min(127, int(preset)))
@@ -677,6 +1043,7 @@ class PianoAppController(QObject):
                     return False
                 self.audio_engine.set_instrument(str(instrument.path), bank=bank, preset=preset)
             current_bank, current_preset = self.audio_engine.get_current_program()
+            self._stop_all_notes(preserve_pedal=True)
         except Exception as exc:
             self.window.show_warning(
                 "Instrument Error",
@@ -696,7 +1063,7 @@ class PianoAppController(QObject):
         new_mode: PianoMode = "88" if mode == "88" else "61"
         if new_mode == self._mode:
             return
-        self._stop_all_notes()
+        self._stop_local_notes()
         if self._keybind_edit_active:
             self._apply_mode(new_mode, persist=True, mapping_full=self._keybind_staging_map_full)
         else:
@@ -719,6 +1086,8 @@ class PianoAppController(QObject):
         self._mode_min, self._mode_max = MODE_RANGES[mode]
 
         self.window.piano_widget.set_mode(mode, self._mapping, self._note_labels)
+        for note in self._note_sources:
+            self.window.piano_widget.set_pressed(note, True)
         self._sync_piano_label_visibility()
         self.window.piano_widget.set_ui_scale(self._ui_scale)
         self.window.set_mode(mode)
@@ -755,12 +1124,23 @@ class PianoAppController(QObject):
             persist=True,
         )
 
+    def _on_program_changed(self, bank: int, preset: int) -> None:
+        if (bank, preset) != (self._instrument_bank, self._instrument_preset):
+            self._apply_program_selection(bank, preset, persist=True)
+
     def _on_volume_changed(self, volume: float) -> None:
-        self._volume = max(0.0, min(1.0, float(volume)))
-        self.audio_engine.set_master_volume(self._volume)
+        self._volume = normalize_volume(volume)
+        try:
+            self._apply_desired_volume()
+        except Exception as exc:
+            self._report_audio_error(exc)
         self.window.set_volume(self._volume)
         self._refresh_stats_ui()
         self._schedule_persist()
+
+    def _apply_desired_volume(self) -> None:
+        if not self._is_shutdown and not self._audio_handoff:
+            self.audio_engine.set_master_volume(self._volume)
 
     def _on_velocity_changed(self, value: int) -> None:
         clamped = max(NOTE_VELOCITY_MIN, min(NOTE_VELOCITY_MAX, int(value)))
@@ -785,6 +1165,7 @@ class PianoAppController(QObject):
             return
         self._sustain_percent = clamped
         self.window.set_sustain_percent(self._sustain_percent)
+        self._sync_pedal_event('settings')
         self._refresh_sustain_deadlines()
         self._refresh_stats_ui()
         self._schedule_persist()
@@ -806,6 +1187,7 @@ class PianoAppController(QObject):
             return
         self._hold_space_for_sustain = mode
         self.window.set_hold_space_sustain_mode(self._hold_space_for_sustain)
+        self._sync_pedal_event('settings')
         self._apply_sustain_gate_target()
         self._refresh_sustain_deadlines()
         self._refresh_stats_ui()
@@ -834,7 +1216,7 @@ class PianoAppController(QObject):
     def _on_change_keybinds_requested(self) -> None:
         if self._tutorial_active or self._keybind_edit_active:
             return
-        self._stop_all_notes()
+        self._stop_local_notes()
         self._keybind_edit_active = True
         self._keybind_selected_note = None
         self._keybind_staging_map_full = dict(self._keybind_committed_map_full)
@@ -1041,10 +1423,15 @@ class PianoAppController(QObject):
         self._schedule_persist()
 
     def _on_midi_input_device_changed(self, device: str) -> None:
+        self._midi_manager.close()
+        self._reset_midi_input()
         self._midi_input_device = str(device).strip()
         self._restore_midi_input_device(persist=True, show_warning=True)
 
     def _on_recording_toggled(self, active: bool) -> None:
+        if active and self._audio_handoff:
+            self.window.set_recording_state(active=self._recorder.is_recording, has_take=self._recorder.has_take())
+            return
         if self._recording_save_active:
             self.window.set_recording_state(active=False, has_take=self._recorder.has_take())
             return
@@ -1093,6 +1480,12 @@ class PianoAppController(QObject):
                     preset=self._instrument_preset,
                     master_volume=self._volume,
                 )
+                if getattr(self.audio_engine, 'piano_recapture_enabled', False):
+                    save_args['piano_recapture'] = True
+                    if getattr(self.audio_engine, 'piano_half_pedal_enabled', False):
+                        save_args['piano_half_pedal'] = True
+                        if getattr(self.audio_engine, 'piano_contact_blend_enabled', False):
+                            save_args['piano_contact_blend'] = True
             except RuntimeError as exc:
                 self.window.show_warning("Recording", str(exc))
                 return
@@ -1103,8 +1496,10 @@ class PianoAppController(QObject):
         worker = threading.Thread(
             target=self._recording_save_worker,
             args=(destination, save_args),
-            daemon=True,
+            name='OpenPiano recording export',
+            daemon=False,
         )
+        self._recording_save_thread = worker
         worker.start()
 
     def _recording_save_worker(self, destination: Path, save_args: dict[str, object]) -> None:
@@ -1164,6 +1559,7 @@ class PianoAppController(QObject):
         self._sync_tutorial_state_from_service()
         self._tutorial_prev_settings_open = self._settings_open
         self._tutorial_prev_controls_open = self._controls_open
+        self._tutorial_prev_stats_visible = self._show_stats
         self._tutorial_prev_mode = self._mode
         self._stop_all_notes()
         self.window.set_tutorial_mode(True)
@@ -1182,6 +1578,10 @@ class PianoAppController(QObject):
             if bool(step.get("open_controls")) and not self._controls_open:
                 self._controls_open = True
                 self.window.set_controls_visible(True)
+            if bool(step.get("show_stats")) and not self._show_stats:
+                self._show_stats = True
+                self.window.set_stats_visible(True)
+                self._refresh_stats_ui()
 
             mode_value = str(step.get("set_mode", "")).strip()
             if mode_value in ("61", "88"):
@@ -1253,6 +1653,10 @@ class PianoAppController(QObject):
             self._controls_open = restore_controls_open
             self.window.set_controls_visible(self._controls_open)
 
+        if self._show_stats != self._tutorial_prev_stats_visible:
+            self._show_stats = self._tutorial_prev_stats_visible
+            self.window.set_stats_visible(self._show_stats)
+
         if self._mode != self._tutorial_prev_mode:
             self._apply_mode(self._tutorial_prev_mode, persist=False)
 
@@ -1260,6 +1664,9 @@ class PianoAppController(QObject):
 
     def _on_website_requested(self) -> None:
         QDesktopServices.openUrl(QUrl(OFFICIAL_WEBSITE_URL))
+
+    def _on_donate_requested(self) -> None:
+        QDesktopServices.openUrl(QUrl(DONATE_PAGE_URL))
 
     def _format_tutorial_step_body(self, step: TutorialStep) -> str:
         body = str(step.get("body", ""))
@@ -1277,6 +1684,8 @@ class PianoAppController(QObject):
         if self._tutorial_active:
             return
         self._stop_all_notes()
+        self._midi_manager.close()
+        self._reset_midi_input()
         defaults = AppSettings()
 
         self._mode = defaults.mode
@@ -1321,7 +1730,7 @@ class PianoAppController(QObject):
 
         self._apply_theme()
         self._apply_ui_state_to_window()
-        self.audio_engine.set_master_volume(self._volume)
+        self._apply_desired_volume()
         self._recording_started_at = 0.0
         self._recording_elapsed_seconds = 0
         self.window.set_recording_elapsed(0)
@@ -1347,17 +1756,27 @@ class PianoAppController(QObject):
         self._schedule_persist()
 
     def _on_mouse_note_pressed(self, base_note: int) -> None:
+        if self._audio_handoff:
+            self._ignore_mouse_until_release = True
+            return
+        if self._ignore_mouse_until_release:
+            return
         if self._tutorial_active or self._keybind_edit_active or self._keyboard_layout_prompt_active:
             return
         self._current_mouse_base_note = int(base_note)
         self._activate_mouse_source(self._current_mouse_base_note)
 
     def _on_mouse_note_released(self, _base_note: int) -> None:
+        self._ignore_mouse_until_release = False
         if self._tutorial_active or self._keybind_edit_active or self._keyboard_layout_prompt_active:
             return
         self._release_mouse_source()
 
     def _on_mouse_drag_note_changed(self, base_note: object) -> None:
+        if base_note is None and not self.window.piano_widget._mouse_pressed:
+            self._ignore_mouse_until_release = False
+        if self._audio_handoff or self._ignore_mouse_until_release:
+            return
         if self._tutorial_active or self._keybind_edit_active or self._keyboard_layout_prompt_active:
             return
         if base_note is None:
@@ -1372,11 +1791,12 @@ class PianoAppController(QObject):
         self._activate_mouse_source(base_note)
 
     def _activate_mouse_source(self, base_note: int) -> None:
+        if self._audio_handoff:
+            return
         source = "mouse"
         previous = self._source_to_sounding_note.pop(source, None)
         if previous is not None:
             self._release_note_source(previous, source)
-        # Mouse clicks should play the visual key under the cursor directly.
         sounding = int(base_note)
         self._source_to_sounding_note[source] = sounding
         self._activate_note(sounding, source, velocity=self._velocity)
@@ -1386,21 +1806,25 @@ class PianoAppController(QObject):
     def _release_mouse_source(self) -> None:
         self._release_source("mouse")
 
-    def _activate_external_source(self, base_note: int, source: str, velocity: int = 100) -> None:
+    def _activate_external_source(self, base_note: int, source: str, velocity: int = 100, *,
+                                  timestamp: float | None = None) -> None:
+        if getattr(self, '_audio_handoff', False):
+            return
         previous = self._source_to_sounding_note.pop(source, None)
         if previous is not None:
-            self._release_note_source(previous, source)
-        sounding = self._apply_transpose(base_note)
+            self._release_note_source(previous, source, timestamp=timestamp)
+        sounding = (max(0, min(127, int(base_note) + self._transpose))
+                    if source.startswith('midi:') else self._apply_transpose(base_note))
         self._source_to_sounding_note[source] = sounding
-        self._activate_note(sounding, source, velocity=velocity)
+        self._activate_note(sounding, source, velocity=velocity, timestamp=timestamp)
         self._record_kps_event()
         self._mark_stats_dirty()
 
-    def _release_source(self, source: str) -> None:
+    def _release_source(self, source: str, *, timestamp: float | None = None) -> None:
         sounding = self._source_to_sounding_note.pop(source, None)
         if sounding is None:
             return
-        self._release_note_source(sounding, source)
+        self._release_note_source(sounding, source, timestamp=timestamp)
         self._mark_stats_dirty()
 
     def _is_main_window_key_context(self, watched: QObject) -> bool:
@@ -1431,11 +1855,11 @@ class PianoAppController(QObject):
             self._on_window_moved()
             return False
         if event.type() in {QEvent.ApplicationDeactivate, QEvent.WindowDeactivate}:
-            self._stop_all_notes()
+            self._stop_local_notes()
             self._refresh_stats_ui()
             return False
         if watched in {self.window, self.window.piano_widget} and event.type() == QEvent.FocusOut:
-            self._stop_all_notes()
+            self._stop_local_notes()
             self._refresh_stats_ui()
             return False
 
@@ -1450,6 +1874,14 @@ class PianoAppController(QObject):
                         return True
                     if is_descendant_of(target, self.window.piano_widget) and self._handle_keybind_mouse_press_event(mouse_event):
                         return True
+
+        if not self._keybind_edit_active and isinstance(event, QMouseEvent):
+            if event.type() == QEvent.MouseButtonPress and is_descendant_of(watched, self.window.piano_widget):
+                if self._handle_mouse_binding_press(event):
+                    return True
+            elif event.type() == QEvent.MouseButtonRelease:
+                if self._handle_mouse_binding_release(event):
+                    return True
 
         if event.type() == QEvent.KeyPress:
             if not self._is_main_window_key_context(watched):
@@ -1523,6 +1955,9 @@ class PianoAppController(QObject):
                 self._space_override_off = True
                 state_changed = True
             if state_changed:
+                self._sync_pedal_event('space')
+                if self._pedal_state.controls_damping:
+                    self._refresh_sustain_deadlines()
                 self._apply_sustain_gate_target()
                 self._mark_stats_dirty()
             return True
@@ -1565,6 +2000,9 @@ class PianoAppController(QObject):
                 self._space_override_off = False
                 state_changed = True
             if state_changed:
+                self._sync_pedal_event('space')
+                if self._pedal_state.controls_damping:
+                    self._refresh_sustain_deadlines()
                 self._apply_sustain_gate_target()
                 self._mark_stats_dirty()
             return True
@@ -1659,6 +2097,33 @@ class PianoAppController(QObject):
         event.accept()
         return True
 
+    def _handle_mouse_binding_press(self, event: QMouseEvent) -> bool:
+        if self._tutorial_active or self._audio_handoff:
+            return False
+        names = {Qt.MouseButton.RightButton: 'right', Qt.MouseButton.MiddleButton: 'middle',
+                 Qt.MouseButton.BackButton: 'x1', Qt.MouseButton.ForwardButton: 'x2'}
+        token = names.get(event.button())
+        if token is None:
+            return False
+        mods = event.modifiers()
+        binding = normalize_mouse_binding(token, ctrl=bool(mods & Qt.ControlModifier),
+            shift=bool(mods & Qt.ShiftModifier), alt=bool(mods & Qt.AltModifier))
+        if binding is None or not self._handle_binding_press(binding, ()):
+            return False
+        self._mouse_button_bindings[int(event.button().value)] = binding
+        self._record_kps_event()
+        self._mark_stats_dirty()
+        event.accept()
+        return True
+
+    def _handle_mouse_binding_release(self, event: QMouseEvent) -> bool:
+        binding = self._mouse_button_bindings.pop(int(event.button().value), None)
+        if binding is None:
+            return False
+        self._handle_binding_release((), binding)
+        event.accept()
+        return True
+
     @staticmethod
     def _key_name_from_event(event: QKeyEvent) -> str:
         key = int(event.key())
@@ -1700,20 +2165,31 @@ class PianoAppController(QObject):
     def _audio_note_on_safe(self, midi_note: int, velocity: int) -> None:
         try:
             self.audio_engine.note_on(midi_note, velocity=velocity)
-        except Exception:
-            return
+        except Exception as exc:
+            self._report_audio_error(exc)
 
     def _audio_note_off_safe(self, midi_note: int) -> None:
         try:
             self.audio_engine.note_off(midi_note)
-        except Exception:
-            return
+        except Exception as exc:
+            self._report_audio_error(exc)
+
+    def _physical_key_release(self, midi_note: int, timestamp: float) -> None:
+        try:
+            release = getattr(self.audio_engine, 'key_release', None)
+            if callable(release):
+                release(midi_note)
+        except Exception as exc:
+            self._report_audio_error(exc)
+        self._recorder.add_key_release(midi_note, timestamp=timestamp)
 
     def _audio_all_notes_off_safe(self) -> None:
+        if getattr(self, '_audio_handoff', False):
+            return
         try:
             self.audio_engine.all_notes_off()
-        except Exception:
-            return
+        except Exception as exc:
+            self._report_audio_error(exc)
 
     def _register_binding_keycodes(self, binding: Binding, keycodes: tuple[int, ...]) -> None:
         stored = self._binding_to_keycodes.setdefault(binding, set())
@@ -1761,6 +2237,8 @@ class PianoAppController(QObject):
         return None
 
     def _handle_binding_press(self, binding: Binding, keycodes: int | tuple[int, ...]) -> bool:
+        if getattr(self, '_audio_handoff', False):
+            return False
         base_notes = self._binding_to_notes.get(binding, ())
         if not base_notes:
             return False
@@ -1804,8 +2282,12 @@ class PianoAppController(QObject):
             released = True
         return released
 
-    def _activate_note(self, note: int, source: str, velocity: int = 100) -> None:
-        self._note_velocities[int(note)] = max(1, min(127, int(velocity)))
+    def _activate_note(self, note: int, source: str, velocity: int = 100, *,
+                       timestamp: float | None = None) -> None:
+        if getattr(self, '_audio_handoff', False):
+            return
+        if note not in self._note_sources:
+            self._note_velocities[int(note)] = max(1, min(127, int(velocity)))
         self._note_lifecycle.activate_note(
             note,
             source,
@@ -1813,42 +2295,60 @@ class PianoAppController(QObject):
             note_on=self._audio_note_on_safe,
             record_note_on=lambda midi_note, vel, ts: self._recorder.add_note_on(midi_note, velocity=vel, timestamp=ts),
             set_pressed=self.window.piano_widget.set_pressed,
+            now=timestamp,
         )
+        self._update_sustain_timer_state()
 
-    def _release_note_source(self, note: int, source: str) -> None:
+    def _release_note_source(self, note: int, source: str, *, timestamp: float | None = None) -> None:
         effective_sustain = self._effective_sustain_percent()
         self._note_lifecycle.release_note_source(
             note,
             source,
             sustain_percent=effective_sustain,
             sustain_temporarily_off=effective_sustain <= 0,
-            stop_note=self._stop_note,
+            stop_note=(self._stop_note if timestamp is None else
+                       lambda key: self._stop_note(key, timestamp=timestamp)),
             set_pressed=self.window.piano_widget.set_pressed,
+            key_release=self._physical_key_release,
+            now=timestamp,
         )
         self._update_sustain_timer_state()
 
-    def _stop_note(self, note: int) -> None:
+    def _stop_note(self, note: int, *, timestamp: float | None = None) -> None:
         self._note_velocities.pop(int(note), None)
         self._note_lifecycle.stop_note(
             note,
             note_off=self._audio_note_off_safe,
-            record_note_off=lambda midi_note, ts: self._recorder.add_note_off(midi_note, timestamp=ts),
+            record_note_off=lambda midi_note, ts: self._recorder.add_note_off(midi_note, timestamp=ts, key_release_fallback=False),
             set_pressed=self.window.piano_widget.set_pressed,
+            now=timestamp,
         )
 
     def _record_note_on_for_active_notes(self) -> None:
         if not self._recorder.is_recording:
             return
+        capture = getattr(self.audio_engine, 'recording_piano_preroll', None)
+        preroll = False
+        if callable(capture):
+            preroll = self._recorder.capture_piano_preroll(capture(self._recorder._start_time))
+        if hasattr(self, '_pedal_state'):
+            self._sync_pedal_event('snapshot')
         notes = set(self._note_sources.keys()) | set(self._sustained_notes.keys())
         if not notes:
             return
         timestamp = time.monotonic()
         for note in notes:
             velocity = self._note_velocities.get(int(note), self._velocity)
-            self._recorder.add_note_on(int(note), velocity=max(1, min(127, int(velocity))), timestamp=timestamp)
+            strike = self._note_lifecycle.strikes.get(int(note))
+            self._recorder.add_note_on(int(note), velocity=max(1, min(127, int(velocity))),
+                timestamp=timestamp, key_held=note in self._note_sources,
+                strike_age_seconds=max(0.0, timestamp-strike.started_at) if strike is not None else 0.0,
+                midi_only_snapshot=preroll)
 
-    def _release_all_sustained(self) -> None:
-        self._note_lifecycle.release_all_sustained(stop_note=self._stop_note)
+    def _release_all_sustained(self, *, timestamp: float | None = None) -> None:
+        self._note_lifecycle.release_all_sustained(
+            stop_note=(self._stop_note if timestamp is None else
+                       lambda key: self._stop_note(key, timestamp=timestamp)))
 
     def _sustain_gate_target(self) -> float:
         return 0.0 if self._is_sustain_temporarily_off() else 100.0
@@ -1861,6 +2361,8 @@ class PianoAppController(QObject):
         return max(0.1, (float(SUSTAIN_TICK_MS) / duration_ms) * 100.0)
 
     def _effective_sustain_percent(self) -> int:
+        if self._pedal_state.controls_damping:
+            return 100 if self._pedal_state.down else 0
         base = max(0, min(100, int(self._sustain_percent)))
         gate = max(0.0, min(100.0, float(self._sustain_gate_percent)))
         return max(0, min(100, int(round(base * (gate / 100.0)))))
@@ -1885,12 +2387,31 @@ class PianoAppController(QObject):
 
     def _update_sustain_timer_state(self) -> None:
         gate_is_moving = abs(float(self._sustain_gate_percent) - self._sustain_gate_target()) > 0.001
-        has_expiring_notes = any(deadline is not None for deadline in self._sustained_notes.values())
-        should_run = gate_is_moving or has_expiring_notes
+        deadlines = [deadline for deadline in self._sustained_notes.values() if deadline is not None]
+        deadline_timer = getattr(self, '_sustain_deadline_timer', None)
+        if deadline_timer is not None:
+            if deadlines:
+                delay_ms = max(1, math.ceil((min(deadlines) - time.monotonic()) * 1000))
+                deadline_timer.start(min(2147483647, delay_ms))
+            else:
+                deadline_timer.stop()
+        should_run = gate_is_moving or (deadline_timer is None and bool(deadlines))
         if should_run and not self._sustain_timer.isActive():
             self._sustain_timer.start()
         elif not should_run and self._sustain_timer.isActive():
             self._sustain_timer.stop()
+
+    def _expire_sustain_notes(self) -> None:
+        if self._is_shutdown:
+            return
+        now = time.monotonic()
+        expired = [note for note, deadline in self._sustained_notes.items()
+                   if deadline is not None and deadline <= now]
+        for note in expired:
+            self._stop_note(note)
+        if expired:
+            self._mark_stats_dirty()
+        self._update_sustain_timer_state()
 
     def _advance_sustain_gate(self) -> bool:
         target = self._sustain_gate_target()
@@ -1921,37 +2442,92 @@ class PianoAppController(QObject):
             return
         timestamp = time.monotonic()
         for note in notes:
-            self._recorder.add_note_off(note, timestamp=timestamp)
+            self._recorder.add_note_off(note, timestamp=timestamp, key_release_fallback=False, damping_resonance=False)
 
-    def _stop_all_notes(self) -> None:
+    def _stop_local_notes(self) -> None:
+        for source in tuple(self._source_to_sounding_note):
+            if not source.startswith('midi:'):
+                self._source_to_sounding_note.pop(source)
+        self._note_lifecycle.discard_sources(lambda source: not source.startswith('midi:'),
+            stop_note=self._stop_note, set_pressed=self.window.piano_widget.set_pressed)
+        self._active_bindings.clear()
+        self._active_binding_sources.clear()
+        self._keycode_to_binding.clear()
+        self._binding_to_keycodes.clear()
+        self._mouse_button_bindings.clear()
+        self._current_mouse_base_note = None
+        if self._space_override_off:
+            self._space_override_off = False
+            self._sync_pedal_event('space')
+            self._apply_sustain_gate_target()
+            self._refresh_sustain_deadlines()
+        self._update_sustain_timer_state()
+        self._mark_stats_dirty()
+
+    def _stop_all_notes(self, *, preserve_pedal: bool = False,
+                        timestamp: float | None = None, midi_cutoff: int | None = None) -> None:
+        self._midi_input_epoch += 1
+        snapshot = getattr(self._midi_manager, 'input_snapshot', None)
+        if midi_cutoff is None and callable(snapshot):
+            _, midi_cutoff, pedals = snapshot()
+            if preserve_pedal and pedals:
+                self._midi_pedal_values = pedals
+                self._pedal_state.set_midi(max(pedals.values()))
+        if midi_cutoff is not None:
+            self._midi_sequence_cutoff = max(getattr(self, '_midi_sequence_cutoff', 0), midi_cutoff)
+        physical_pedal = self._pedal_state.midi_value
+        space_down = self._space_override_off
+        restore_automatic = self._pedal_state.restore_automatic_after_space
         space_was_overridden = self._space_override_off
         previous_gate = float(self._sustain_gate_percent)
         self._active_bindings.clear()
+        getattr(self, '_mouse_button_bindings', {}).clear()
         self._active_binding_sources.clear()
         self._keycode_to_binding.clear()
         self._binding_to_keycodes.clear()
         self._source_to_sounding_note.clear()
         self._current_mouse_base_note = None
         self._space_override_off = False
+        if self._pedal_state.controls_damping:
+            self._pedal_state.set_midi(0)
+        self._pedal_state.space_down = False
+        self._sync_pedal_event('panic', 0, timestamp=timestamp)
         self._sustain_gate_percent = self._sustain_gate_target()
         self._note_lifecycle.stop_all_notes(
             recorder_is_recording=self._recorder.is_recording,
-            record_note_off=lambda midi_note, ts: self._recorder.add_note_off(midi_note, timestamp=ts),
+            record_note_off=lambda midi_note, ts: self._recorder.add_note_off(midi_note, timestamp=ts,
+                key_release_fallback=False, damping_resonance=False),
             set_pressed=self.window.piano_widget.set_pressed,
             all_notes_off=self._audio_all_notes_off_safe,
+            record_all_notes_off=lambda ts: self._recorder.add_all_notes_off(timestamp=ts),
+            now=timestamp,
         )
         self._note_velocities.clear()
+        if restore_automatic:
+            self._pedal_state.reset()
+            self._sync_pedal_event('disconnect', 0)
+        if preserve_pedal:
+            if physical_pedal is not None:
+                self._pedal_state.set_midi(physical_pedal)
+            self._space_override_off = space_down
+            self._sync_pedal_event('panic', timestamp=timestamp)
+            self._sustain_gate_percent = self._sustain_gate_target()
         self.window.piano_widget.clear_effects()
+        self._update_sustain_timer_state()
         if space_was_overridden or abs(previous_gate - self._sustain_gate_percent) > 0.001:
             self._mark_stats_dirty()
 
-    def _refresh_sustain_deadlines(self) -> None:
+    def _refresh_sustain_deadlines(self, *, timestamp: float | None = None) -> None:
         effective_sustain = self._effective_sustain_percent()
         self._note_lifecycle.refresh_sustain_deadlines(
             sustain_percent=effective_sustain,
             sustain_temporarily_off=effective_sustain <= 0,
-            release_all_sustained=self._release_all_sustained,
+            release_all_sustained=lambda: self._release_all_sustained(timestamp=timestamp),
+            now=timestamp,
         )
+        if self._pedal_state.restore_automatic_after_space and not self._pedal_state.space_down:
+            self._pedal_state.reset()
+            self._sync_pedal_event('disconnect', 0)
         self._update_sustain_timer_state()
 
     def _record_kps_event(self) -> None:
@@ -2006,6 +2582,11 @@ class PianoAppController(QObject):
 
     def _on_sustain_tick(self) -> None:
         transition_changed = self._advance_sustain_gate()
+        if getattr(self, '_sustain_deadline_timer', None) is not None:
+            if transition_changed:
+                self._mark_stats_dirty()
+            self._update_sustain_timer_state()
+            return
         effective_sustain = self._effective_sustain_percent()
         if effective_sustain <= 0:
             if self._sustained_notes:
@@ -2048,7 +2629,7 @@ class PianoAppController(QObject):
             instrument_id=self._instrument_id,
             volume=self._volume,
             velocity=self._velocity,
-            show_stats=self._show_stats,
+            show_stats=self._tutorial_prev_stats_visible if self._tutorial_active else self._show_stats,
             controls_open=self._controls_open,
             transpose=self._transpose,
             sustain_percent=self._sustain_percent,
@@ -2110,7 +2691,7 @@ class PianoAppController(QObject):
 
     def _ask_keyboard_input_mode_choice(self) -> str | None:
         self._keyboard_layout_prompt_active = True
-        self._stop_all_notes()
+        self._stop_local_notes()
         piano_widget = self.window.piano_widget
         was_enabled = bool(piano_widget.isEnabled())
         if was_enabled:
@@ -2121,7 +2702,7 @@ class PianoAppController(QObject):
             if was_enabled:
                 piano_widget.setEnabled(True)
             self._keyboard_layout_prompt_active = False
-            self._stop_all_notes()
+            self._stop_local_notes()
             piano_widget.setFocus(Qt.ActiveWindowFocusReason)
             self._refresh_stats_ui()
 
@@ -2131,7 +2712,7 @@ class PianoAppController(QObject):
         target_default_keybinds = build_default_keybind_map_full(target)
         should_translate = previous != target or target == "layout"
         if should_translate:
-            self._stop_all_notes()
+            self._stop_local_notes()
             translated, overrides = translate_keybind_map(
                 previous_mode=previous,
                 target_mode=target,
@@ -2288,6 +2869,7 @@ class PianoAppController(QObject):
                 self._update_service.launch_prepared_update(
                     prepared_update,
                     restart_after_update=bool(self._update_handoff_restart),
+                    stop_event=self._update_stop_event,
                 )
                 version = str(getattr(prepared_update, "latest_version", "") or payload.get("latest") or "")
                 result = {
@@ -2464,6 +3046,8 @@ class PianoAppController(QObject):
         self._is_shutdown = True
         self._update_stop_event.set()
         self._recording_save_stop_event.set()
+        self._piano_download_stop.set()
+        self._piano_download_active = False
         self._midi_dropdown_refresh_active = False
         self._recording_save_active = False
         with self._update_lock:
@@ -2476,6 +3060,8 @@ class PianoAppController(QObject):
             self._stats_refresh_timer.stop()
         if self._sustain_timer.isActive():
             self._sustain_timer.stop()
+        self._sustain_deadline_timer.stop()
+        self._audio_health_timer.stop()
         if self._save_timer.isActive():
             self._save_timer.stop()
 
@@ -2494,7 +3080,7 @@ class PianoAppController(QObject):
         self._recording_elapsed_seconds = 0
         self._safe_call(lambda: self.window.set_recording_elapsed(0))
         self._safe_call(self._stop_all_notes)
-        self._safe_call(self.audio_engine.shutdown)
+        self._audio_session.close()
         self._safe_call(self.window.close_update_progress)
         self._safe_call(lambda: self.window.set_recording_save_busy(False))
         self._safe_call(self._persist_settings_now)

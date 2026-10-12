@@ -6,17 +6,29 @@ import sys
 from pathlib import Path
 from typing import Protocol
 
-from openpiano.core.audio_output import default_output_driver, list_output_drivers
+from openpiano.core.audio_output import default_output_driver, list_output_drivers, output_profiles
+from openpiano.core.audio_levels import normalize_volume, playback_gain
+from openpiano.core.audio_processing import start_protected_audio_driver
+from openpiano.core.config import DEFAULT_AUDIO_POLYPHONY
 from openpiano.core.fluidsynth_loader import (
     candidate_dll_dirs,
     configure_dll_search_paths,
     ensure_fluidsynth_loaded,
 )
-from openpiano.core.normalize import clamp_float, clamp_int
+from openpiano.core.normalize import clamp_int
+from openpiano.core.piano_key_release import (
+    KEY_RELEASE_BANK, KEY_RELEASE_POLYPHONY, PianoKeyRelease, has_piano_key_release,
+    has_piano_release_resonance,
+)
 from openpiano.core.program_selection import normalize_program_selection
+from openpiano.core.piano_room import PianoRoom, has_piano_room
+from openpiano.core.soundfont_loading import load_soundfont, dispose_soundfont_loader
+from openpiano.core.native_audio import native_audio_library
+from openpiano.core.piano_damping import staged_piano_damping
+from openpiano.core.soundfont_capabilities import inspect_soundfont
+from openpiano.core.native_result import check_native_result, release_native_note
 
-AUDIO_SAMPLE_RATE = 44100
-DEFAULT_AUDIO_POLYPHONY = 128
+AUDIO_SAMPLE_RATE = 48000
 _PROGRAM_CACHE_LIMIT = 16
 
 
@@ -26,6 +38,12 @@ class AudioEngineProtocol(Protocol):
         ...
 
     def note_off(self, midi_note: int) -> None:
+        ...
+
+    def key_release(self, midi_note: int) -> None:
+        ...
+
+    def set_pedal(self, value: int) -> None:
         ...
 
     def all_notes_off(self) -> None:
@@ -69,6 +87,12 @@ class SilentAudioEngine:
     def note_off(self, midi_note: int) -> None:
         return
 
+    def key_release(self, midi_note: int) -> None:
+        return
+
+    def set_pedal(self, value: int) -> None:
+        return
+
     def all_notes_off(self) -> None:
         return
 
@@ -110,7 +134,16 @@ class FluidSynthAudioEngine:
         sample_rate: int = AUDIO_SAMPLE_RATE,
         polyphony: int = DEFAULT_AUDIO_POLYPHONY,
         channels: int | None = None,
+        *,
+        piano_recapture: bool = False,
+        piano_half_pedal: bool = False,
+        piano_contact_blend: bool = False,
+        start_output: bool = True,
     ) -> None:
+        if piano_contact_blend and not (piano_recapture and piano_half_pedal):
+            raise ValueError('Contact blending requires experimental half-pedal.')
+        if piano_half_pedal and not piano_recapture:
+            raise ValueError('Half-pedal requires experimental piano recapture.')
         configure_dll_search_paths()
         module, error = ensure_fluidsynth_loaded()
         if module is None:
@@ -132,6 +165,7 @@ class FluidSynthAudioEngine:
         self._fluidsynth_module = module
         self._sfid: int | None = None
         self._soundfont_path: str | None = None
+        self._soundfont_capabilities = None
         self._bank = 0
         self._preset = 0
         self._output_driver = self._default_output_driver()
@@ -143,22 +177,67 @@ class FluidSynthAudioEngine:
         ] = {}
         self._loaded_soundfont_key: tuple[str, int, int] | None = None
         self._active_notes: set[int] = set()
-        self._create_synth()
-        self._output_driver = self._start_synth(self._output_driver)
-        self._set_gain(self.master_volume)
+        self._key_release: PianoKeyRelease | None = None
+        self._room: PianoRoom | None = None
+        self._pedal_value = 0
+        self._piano_recapture_requested = bool(piano_recapture)
+        self._piano_half_pedal_requested = bool(piano_half_pedal)
+        self._piano_contact_blend_requested = bool(piano_contact_blend)
+        self._piano_damping = None
+        self._synth = None
+        self._closed = False
+        self._output_started = False
+        self._output_profile = None
+        try:
+            self._create_synth()
+            if start_output:
+                self.start_output()
+            self._set_gain(self.master_volume)
+        except BaseException:
+            self.shutdown()
+            raise
+
+    def start_output(self) -> None:
+        if self._closed:
+            raise RuntimeError('Audio engine is closed.')
+        if not self._output_started:
+            self._output_driver = self._start_synth(self._output_driver)
+            self._output_started = True
+
+    def stop_output(self) -> None:
+        synth = self._synth
+        output = getattr(synth, '_openpiano_output', None)
+        device_output = getattr(output, 'device_output', None)
+        if device_output is not None:
+            device_output.stop()
+        driver = getattr(synth, 'audio_driver', None)
+        if driver:
+            delete_driver = self._fluidsynth_module.cfunc('delete_fluid_audio_driver', None,
+                ('driver', ctypes.c_void_p, 1))
+            delete_driver(driver)
+            synth.audio_driver = None
+        self._output_started = False
+
+    def failure_count(self) -> int:
+        output = getattr(self._synth, '_openpiano_output', None)
+        return output.failure_count() if output is not None else 0
 
     @staticmethod
     def _default_output_driver() -> str:
         return default_output_driver()
 
     def list_output_drivers(self) -> list[str]:
-        return list_output_drivers()
+        return list_output_drivers(self._fluidsynth_module, self._synth.settings)
 
     def get_output_driver(self) -> str:
         return self._output_driver
 
     def _new_synth(self):
-        synth = self._fluidsynth_module.Synth(samplerate=float(self.sample_rate))
+        try:
+            synth = self._fluidsynth_module.Synth(samplerate=float(self.sample_rate),
+                **{'synth.polyphony': max(self.polyphony, KEY_RELEASE_POLYPHONY)})
+        except TypeError:
+            synth = self._fluidsynth_module.Synth(samplerate=float(self.sample_rate))
         if hasattr(synth, "setting"):
             try:
                 synth.setting("synth.polyphony", int(self.polyphony))
@@ -169,17 +248,19 @@ class FluidSynthAudioEngine:
     def _create_synth(self) -> None:
         self._synth = self._new_synth()
 
-    def _start_driver_attempts(self, preferred_driver: str | None) -> list[dict[str, str]]:
-        attempts: list[dict[str, str]] = []
+    def _start_driver_attempts(self, preferred_driver: str | None) -> list[dict[str, object]]:
+        attempts: list[dict[str, object]] = []
         preferred = str(preferred_driver or "").strip().lower()
         if sys.platform == "win32":
-            ordered = [preferred] if preferred else []
-            ordered.extend(driver for driver in self.list_output_drivers() if driver and driver != preferred)
-            attempts.extend([{"driver": driver} for driver in ordered if driver])
+            available = self.list_output_drivers()
+            ordered = [preferred] if preferred in available else []
+            ordered.extend(driver for driver in available if driver != preferred)
+            for driver in ordered:
+                attempts.extend(output_profiles(driver, native_callback=native_audio_library() is not None))
         attempts.append({})
         return attempts
 
-    def _start_synth_with_kwargs(self, kwargs: dict[str, str]) -> str:
+    def _start_synth_with_kwargs(self, kwargs: dict[str, object]) -> str:
         driver = str(kwargs.get("driver", "")).strip().lower()
         device = str(kwargs.get("device", "")).strip()
         if hasattr(self._synth, "setting"):
@@ -187,20 +268,33 @@ class FluidSynthAudioEngine:
                 self._synth.setting("audio.driver", driver)
             if device and driver:
                 self._synth.setting(f"audio.{driver}.device", device)
+            if sys.platform == 'win32':
+                self._synth.setting('audio.period-size', int(kwargs.get('period_size', 512)))
+                self._synth.setting('audio.periods', int(kwargs.get('periods', 8)))
+                self._synth.setting('audio.sample-format', str(kwargs.get('sample_format', '16bits')))
+                if driver == 'wasapi':
+                    self._synth.setting('audio.wasapi.exclusive-mode', 0)
 
         create_audio_driver = getattr(self._fluidsynth_module, "new_fluid_audio_driver", None)
         if create_audio_driver is None:
             try:
-                self._synth.start(**kwargs)
+                legacy_kwargs = {key: value for key, value in kwargs.items() if key in ('driver', 'device')}
+                self._synth.start(**legacy_kwargs)
+                self._output_profile = dict(kwargs)
                 return driver
             except TypeError:
                 self._synth.start()
+                self._output_profile = {}
                 return ""
 
-        self._synth.audio_driver = create_audio_driver(self._synth.settings, self._synth.synth)
-        if not self._synth.audio_driver:
-            raise RuntimeError(f"Could not start FluidSynth audio driver '{driver or 'default'}'.")
-        return driver
+        if (sys.platform == 'win32' and driver == 'wasapi'
+                and not device and kwargs.get('sample_format') == 'float'):
+            start_protected_audio_driver(self._fluidsynth_module, self._synth, self.sample_rate,
+                                         wasapi_periods=int(kwargs.get('periods', 3)))
+        else:
+            start_protected_audio_driver(self._fluidsynth_module, self._synth, self.sample_rate)
+        self._output_profile = dict(kwargs)
+        return driver or str(self._synth.get_setting('audio.driver') or '')
 
     def _start_synth(self, preferred_driver: str | None = None) -> str:
         last_error: Exception | None = None
@@ -240,11 +334,14 @@ class FluidSynthAudioEngine:
                 pass
 
     def set_master_volume(self, volume: float) -> None:
-        clamped = clamp_float(volume, 0.0, 1.0, default=1.0)
-        self.master_volume = clamped
-        self._set_gain(clamped)
+        self.master_volume = normalize_volume(volume)
+        self._apply_playback_gain()
 
-    def set_instrument(self, soundfont_path: str, bank: int = 0, preset: int = 0) -> None:
+    def _apply_playback_gain(self) -> None:
+        self._set_gain(playback_gain(self.master_volume, self._soundfont_path, self._bank, self._preset,
+            capabilities=getattr(self, '_soundfont_capabilities', None)))
+
+    def set_instrument(self, soundfont_path: str, bank: int = 0, preset: int = 0, *, stop_event=None) -> None:
         sf_path = Path(soundfont_path).expanduser()
         if not sf_path.is_file():
             raise FileNotFoundError(f"SoundFont not found: {sf_path}")
@@ -263,8 +360,16 @@ class FluidSynthAudioEngine:
 
         new_sfid: int | None = None
         old_sfid = self._sfid
+        old_key_release = getattr(self, '_key_release', None)
+        old_room = getattr(self, '_room', None)
+        old_piano_damping = getattr(self, '_piano_damping', None)
+        new_room = None
+        new_piano_damping = None
+        new_key_release = None
+        capabilities = inspect_soundfont(sf_path, stop_event=stop_event)
+        release_enabled = has_piano_key_release(sf_path, capabilities=capabilities)
         try:
-            new_sfid = int(self._sfload(str(sf_path)))
+            new_sfid = int(self._sfload(str(sf_path), capabilities=capabilities, stop_event=stop_event))
             cached = self._program_cache.get(cache_key)
             if cached is None:
                 available_programs, available_program_names = self._discover_available_programs(
@@ -279,28 +384,74 @@ class FluidSynthAudioEngine:
             else:
                 available_programs = self._copy_programs(cached[0])
                 available_program_names = self._copy_program_names(cached[1])
+            if release_enabled:
+                available_programs.pop(KEY_RELEASE_BANK, None)
+                available_program_names.pop(KEY_RELEASE_BANK, None)
             selected_bank, selected_preset = normalize_program_selection(
                 available_programs,
                 target_bank,
                 target_preset,
             )
-            self._synth.program_select(0, new_sfid, selected_bank, selected_preset)
+            check_native_result(self._synth.program_select(0, new_sfid, selected_bank, selected_preset),
+                'select the requested SoundFont program')
+            if release_enabled:
+                new_key_release = PianoKeyRelease(self._synth, new_sfid, self.polyphony,
+                    resonance=has_piano_release_resonance(sf_path, capabilities=capabilities))
+            self.all_notes_off()
+            if old_room is not None:
+                old_room.close()
+            if (selected_bank, selected_preset) == (0, 0) and has_piano_room(sf_path, capabilities=capabilities):
+                new_room = PianoRoom.create(self._synth, self._fluidsynth_module)
+                if new_room is not None:
+                    new_room.activate()
+            if old_piano_damping is not None:
+                old_piano_damping.disable()
+            if getattr(self, '_piano_recapture_requested', False):
+                new_piano_damping = staged_piano_damping(self._fluidsynth_module,
+                    self._synth, self.sample_rate, sf_path, selected_bank, selected_preset,
+                    half_pedal=getattr(self, '_piano_half_pedal_requested', False),
+                    contact_blend=getattr(self, '_piano_contact_blend_requested', False), capabilities=capabilities)
+            capabilities.validate_unchanged()
         except Exception:
+            if new_room is not None:
+                try:
+                    new_room.close()
+                except Exception:
+                    pass
             if new_sfid is not None:
                 try:
                     self._sfunload(new_sfid)
                 except Exception:
                     pass
+            try:
+                if old_sfid is not None:
+                    self._synth.program_select(0, old_sfid, self._bank, self._preset)
+                if old_key_release is not None:
+                    old_key_release.select_program()
+                if old_room is not None:
+                    old_room.activate()
+                if old_piano_damping is not None and not old_piano_damping.enabled:
+                    old_piano_damping.activate()
+                if hasattr(self._synth, 'setting'):
+                    self._synth.setting('synth.polyphony', max(self.polyphony, KEY_RELEASE_POLYPHONY) if old_key_release is not None else self.polyphony)
+            except Exception:
+                pass
             raise
 
-        self.all_notes_off()
+        self._key_release = new_key_release
+        self._room = new_room
+        self._piano_damping = new_piano_damping
+        if old_key_release is not None and not release_enabled:
+            self._synth.setting('synth.polyphony', self.polyphony)
         self._sfid = new_sfid
         self._soundfont_path = str(sf_path)
+        self._soundfont_capabilities = capabilities
         self._loaded_soundfont_key = cache_key
         self._bank = selected_bank
         self._preset = selected_preset
         self._available_programs = available_programs
         self._available_program_names = available_program_names
+        self._apply_playback_gain()
         if old_sfid is not None and old_sfid != new_sfid:
             try:
                 self._sfunload(old_sfid)
@@ -317,41 +468,101 @@ class FluidSynthAudioEngine:
         )
         if (selected_bank, selected_preset) == (self._bank, self._preset):
             return
-        self.all_notes_off()
         result = self._synth.program_select(0, self._sfid, selected_bank, selected_preset)
-        if result is not None:
-            try:
-                if int(result) < 0:
-                    raise RuntimeError(
-                        f"FluidSynth could not select bank {selected_bank}, preset {selected_preset}."
-                    )
-            except (TypeError, ValueError):
-                pass
+        check_native_result(result, f'select bank {selected_bank}, preset {selected_preset}')
+        self.all_notes_off()
         self._bank = selected_bank
         self._preset = selected_preset
+        self._apply_playback_gain()
 
     def note_on(self, midi_note: int, velocity: int = 100) -> None:
         if self._sfid is None:
             return
+        room = getattr(self, '_room', None)
+        if room is not None:
+            room.resume()
         note = self._clamp_note(midi_note)
         if note in self._active_notes:
-            self._synth.noteoff(0, note)
-        self._synth.noteon(0, note, self._clamp_velocity(velocity))
+            release_native_note(self._synth, 0, note)
+        check_native_result(self._synth.noteon(0, note, self._clamp_velocity(velocity)), 'start a note')
+        piano = getattr(self, '_piano_damping', None)
+        if piano is not None:
+            piano.press(note, self._clamp_velocity(velocity))
         self._active_notes.add(note)
+        release = getattr(self, '_key_release', None)
+        if release is not None:
+            release.press(note, self._clamp_velocity(velocity))
+
+    def key_release(self, midi_note: int) -> None:
+        piano = getattr(self, '_piano_damping', None)
+        if piano is not None:
+            piano.key_release(self._clamp_note(midi_note))
+        release = getattr(self, '_key_release', None)
+        if release is not None:
+            release.release(self._clamp_note(midi_note))
+
+    @property
+    def piano_recapture_enabled(self) -> bool:
+        piano = getattr(self, '_piano_damping', None)
+        return piano is not None and piano.enabled
+
+    def recording_piano_preroll(self, now: float):
+        return self._piano_damping.recording_preroll(now) if self.piano_recapture_enabled else None
+
+    @property
+    def piano_half_pedal_enabled(self) -> bool:
+        return self.piano_recapture_enabled and self._piano_damping.half_pedal
+
+    @property
+    def piano_contact_blend_enabled(self) -> bool:
+        return self.piano_half_pedal_enabled and self._piano_damping.contact_blend
+
+    def set_pedal(self, value: int, *, recapture_owned: bool = True,
+                  emit_contacts: bool = True) -> None:
+        self._pedal_value = max(0, min(127, int(value)))
+        piano = getattr(self, '_piano_damping', None)
+        if piano is not None:
+            contacts = piano.pedal(self._pedal_value if recapture_owned else 0)
+            release = getattr(self, '_key_release', None)
+            if release is not None and emit_contacts:
+                for note, loss in contacts:
+                    release.damp(note, retain=True, damping_loss_db=loss,
+                                 contact_strength=piano.contact_strength)
 
     def note_off(self, midi_note: int) -> None:
         note = self._clamp_note(midi_note)
+        was_active = note in self._active_notes
         self._active_notes.discard(note)
         if self._sfid is None:
             return
-        self._synth.noteoff(0, note)
+        self.key_release(note)
+        piano = getattr(self, '_piano_damping', None)
+        captured = piano is not None and piano.damp(note)
+        if not captured:
+            release_native_note(self._synth, 0, note)
+        release = getattr(self, '_key_release', None)
+        if release is not None and was_active:
+            loss = piano.damping_loss(note) if captured else None
+            release.damp(note, enabled=not captured or loss is not None,
+                         retain=captured, damping_loss_db=loss or 0.0,
+                         contact_strength=piano.contact_strength if captured else 1.0)
 
     def all_notes_off(self) -> None:
+        self._pedal_value = 0
         for note in list(self._active_notes):
-            self._synth.noteoff(0, note)
+            release_native_note(self._synth, 0, note)
         self._active_notes.clear()
+        piano = getattr(self, '_piano_damping', None)
+        if piano is not None:
+            piano.clear()
+        release = getattr(self, '_key_release', None)
+        if release is not None:
+            release.stop()
         if self._sfid is not None:
-            self._synth.cc(0, 123, 0)
+            check_native_result(self._synth.cc(0, 120, 0), 'silence the piano')
+        room = getattr(self, '_room', None)
+        if room is not None:
+            room.clear()
 
     def get_available_programs(self) -> dict[int, list[int]]:
         return {bank: list(presets) for bank, presets in self._available_programs.items()}
@@ -368,68 +579,34 @@ class FluidSynthAudioEngine:
     def set_output_driver(self, driver: str) -> None:
         requested = str(driver).strip().lower()
         available = self.list_output_drivers()
-        target = requested if requested in available else (available[0] if available else "")
+        target = requested if requested in available else (available[0] if available else '')
         if target == self._output_driver:
             return
+        self._replace_output(target)
 
-        old_synth = self._synth
-        old_output_driver = self._output_driver
-        old_sfid = self._sfid
-        old_soundfont_path = self._soundfont_path
-        old_loaded_soundfont_key = self._loaded_soundfont_key
-        old_bank = self._bank
-        old_preset = self._preset
-        old_programs = self._available_programs
-        old_program_names = self._available_program_names
-        old_active_notes = set(self._active_notes)
-        candidate = self._new_synth()
+    def restart_output(self) -> None:
+        self._replace_output(self._output_driver)
+
+    def _replace_output(self, target: str) -> None:
+        if self._closed:
+            raise RuntimeError('Audio engine is closed.')
+        previous = self._output_driver
+        previous_profile = getattr(self, '_output_profile', None)
+        was_started = self._output_started
+        self.stop_output()
         try:
-            self._synth = candidate
-            self._sfid = None
-            self._soundfont_path = None
-            self._loaded_soundfont_key = None
-            self._available_programs = {}
-            self._available_program_names = {}
-            self._active_notes = set()
-            candidate_driver = self._start_synth(target)
-            self._set_gain(self.master_volume)
-            if old_soundfont_path and Path(old_soundfont_path).is_file():
-                self.set_instrument(old_soundfont_path, bank=old_bank, preset=old_preset)
+            self._output_driver = self._start_synth(target)
+            self._output_started = True
         except Exception:
-            try:
-                candidate.delete()
-            except Exception:
-                pass
-            self._synth = old_synth
-            self._output_driver = old_output_driver
-            self._sfid = old_sfid
-            self._soundfont_path = old_soundfont_path
-            self._loaded_soundfont_key = old_loaded_soundfont_key
-            self._bank = old_bank
-            self._preset = old_preset
-            self._available_programs = old_programs
-            self._available_program_names = old_program_names
-            self._active_notes = old_active_notes
-            raise
-
-        for note in old_active_notes:
-            try:
-                old_synth.noteoff(0, note)
-            except Exception:
-                pass
-        try:
-            if old_sfid is not None:
+            self._output_driver = previous
+            if was_started:
                 try:
-                    old_synth.sfunload(old_sfid, update_midi_preset=False)
-                except TypeError:
-                    old_synth.sfunload(old_sfid)
-        except Exception:
-            pass
-        try:
-            old_synth.delete()
-        except Exception:
-            pass
-        self._output_driver = candidate_driver
+                    self._output_driver = (self._start_synth_with_kwargs(previous_profile)
+                        if previous_profile is not None else self._start_synth(previous))
+                    self._output_started = True
+                except Exception:
+                    self._output_started = False
+            raise
 
     @staticmethod
     def _copy_programs(programs: dict[int, list[int]]) -> dict[int, list[int]]:
@@ -453,9 +630,6 @@ class FluidSynthAudioEngine:
         programs: dict[int, list[int]],
         names: dict[int, dict[int, str]],
     ) -> None:
-        # A replaced file at the same path supersedes its old metadata. Keeping
-        # one entry per path also prevents repeated in-place edits from growing
-        # the cache indefinitely.
         path_key = cache_key[0]
         stale_keys = [
             key
@@ -655,29 +829,31 @@ class FluidSynthAudioEngine:
         except Exception:
             return bool(result)
 
-    def _sfload(self, soundfont_path: str) -> int:
-        try:
-            return int(self._synth.sfload(soundfont_path, reset_presets=False))
-        except TypeError:
-            pass
-        try:
-            return int(self._synth.sfload(soundfont_path, False))
-        except TypeError:
-            return int(self._synth.sfload(soundfont_path))
+    def _sfload(self, soundfont_path: str, *, capabilities=None, stop_event=None) -> int:
+        return load_soundfont(self._synth, soundfont_path, module=self._fluidsynth_module,
+            capabilities=capabilities, stop_event=stop_event)
 
     def _sfunload(self, sfid: int) -> None:
         try:
-            self._synth.sfunload(sfid, update_midi_preset=False)
+            check_native_result(self._synth.sfunload(sfid, update_midi_preset=False), 'unload the SoundFont')
             return
         except TypeError:
             pass
         try:
-            self._synth.sfunload(sfid, False)
+            check_native_result(self._synth.sfunload(sfid, False), 'unload the SoundFont')
             return
         except TypeError:
-            self._synth.sfunload(sfid)
+            check_native_result(self._synth.sfunload(sfid), 'unload the SoundFont')
 
     def shutdown(self) -> None:
+        if getattr(self, '_closed', False):
+            return
+        synth = self._synth
+        if synth is None:
+            self._closed = True
+            return
+        self.stop_output()
+        self._closed = True
         try:
             self.all_notes_off()
         except Exception:
@@ -687,12 +863,21 @@ class FluidSynthAudioEngine:
                 self._sfunload(self._sfid)
                 self._sfid = None
             self._soundfont_path = None
+            self._soundfont_capabilities = None
+            self._key_release = None
+            self._room = None
+            self._piano_damping = None
             self._loaded_soundfont_key = None
             self._available_programs = {}
             self._available_program_names = {}
         except Exception:
             pass
-        try:
-            self._synth.delete()
-        except Exception:
-            pass
+        synth.delete()
+        dispose_soundfont_loader(synth)
+        output = getattr(synth, '_openpiano_output', None)
+        if output is not None:
+            output.close()
+            synth._openpiano_output = None
+        for owner in getattr(synth, '_openpiano_piano_owners', ()):
+            owner.close()
+        self._synth = None
