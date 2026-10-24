@@ -56,10 +56,6 @@ def update_notes_text(payload: dict[str, object]) -> str:
     if notes:
         text = "\n\nWhat's new:\n" + "\n".join((f"- {line}" for line in notes[:8]))
     if bool(payload.get("requires_manual_update", False)):
-        minimum_supported = str(payload.get("minimum_supported_version") or "1.0.0").strip() or "1.0.0"
-        text += (
-            "\n\nYour current version is below the minimum supported "
-            f"auto-update baseline ({minimum_supported})."
-        )
+        text += "\n\nThis version needs a manual update. Download and run the latest installer."
     return text
 

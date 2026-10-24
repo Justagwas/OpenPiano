@@ -14,6 +14,14 @@ from PySide6.QtWidgets import (
 from openpiano.core.theme import ThemePalette
 
 
+class RestoreCursorOnHide:
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        restore = getattr(self.parentWidget(), "_restore_cursor_state_after_modal", None)
+        if callable(restore):
+            restore()
+
+
 def message_box_stylesheet(theme: ThemePalette) -> str:
     return f"""
             QDialog, QMessageBox {{

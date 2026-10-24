@@ -26,7 +26,6 @@ from pathlib import Path
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from openpiano.app_controller import PianoAppController
 from openpiano.core.config import APP_NAME
 from openpiano.core.runtime_paths import icon_path_candidates
 
@@ -93,19 +92,33 @@ def main() -> int:
         return 0
 
     controller = None
+    splash = None
     try:
-        controller = PianoAppController(app, icon_path=icon_path)
+        from openpiano.ui.loading_splash import create_loading_splash
+        splash = create_loading_splash(APP_NAME)
+        splash.show()
+        app.processEvents()
+        from openpiano.app_controller import PianoAppController
+        controller = PianoAppController(app, icon_path=icon_path, startup_status=splash.set_status)
+        splash.close()
         controller.run()
+        from PySide6.QtCore import QTimer
+        from openpiano.ui.update_dialog import show_update_completion
+        QTimer.singleShot(0, controller.window, lambda: show_update_completion(controller.window))
         try:
             return app.exec()
         except KeyboardInterrupt:
             app.quit()
             return 130
     finally:
+        if splash is not None:
+            splash.close()
         if controller is not None:
             controller.shutdown()
             controller.wait_for_audio_shutdown()
         instance_guard.release()
+        from openpiano.update_handoff import commit_pending_update
+        commit_pending_update()
 
 
 if __name__ == "__main__":

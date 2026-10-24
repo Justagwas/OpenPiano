@@ -6,7 +6,7 @@ from typing import Literal, cast
 from openpiano.core.normalize import clamp_float, quantize_step
 
 APP_NAME = "OpenPiano"
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.0.1"
 INNO_SETUP_APP_ID = "OpenPianoJustagwas"
 OFFICIAL_WEBSITE_URL = "https://www.justagwas.com/projects/openpiano"
 DONATE_PAGE_URL = "https://www.justagwas.com/donate"

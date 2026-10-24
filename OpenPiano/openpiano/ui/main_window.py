@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+
 from contextlib import contextmanager
 
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
+from .update_dialog import get_update_dialog, ask_update_install_preference, ask_update_handoff
 from shiboken6 import isValid
 
 from PySide6.QtCore import QEvent, QEventLoop, QPoint, QPointF, QRect, QSize, Qt, Signal, QTimer
@@ -28,7 +30,6 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QMessageBox,
     QPushButton,
-    QProgressDialog,
     QScrollArea,
     QSlider,
     QTextEdit,
@@ -195,7 +196,7 @@ class MainWindow(QMainWindow):
         self._global_event_filter_installed = False
         self._pending_midi_input_devices: tuple[list[str], str] | None = None
         self._last_stylesheet = ""
-        self._update_progress_dialog: QProgressDialog | None = None
+        self._update_progress_dialog: QDialog | None = None
         self._key_color_values: dict[str, str] = {
             "white_key": "",
             "white_key_pressed": "",
@@ -857,21 +858,6 @@ class MainWindow(QMainWindow):
             checkbox.setStyle(style)
             self._checkbox_styles.append(style)
 
-    def _apply_update_checkbox_styles(self, dialog: QWidget) -> None:
-        styles: list[SquareCheckBoxStyle] = []
-        size = max(18, min(40, self._sp(24)))
-        radius = max(3, int(round(size / 5)))
-        for checkbox in dialog.findChildren(QCheckBox):
-            style = SquareCheckBoxStyle(
-                border_color=self.theme.border,
-                fill_color=self.theme.accent,
-                check_color=self.theme.text_primary,
-                size=size,
-                radius=radius,
-            )
-            checkbox.setStyle(style)
-            styles.append(style)
-        dialog._update_checkbox_styles = styles
 
     def _refresh_checkbox_style_colors(self) -> None:
         size = max(18, min(40, self._sp(24)))
@@ -2161,8 +2147,6 @@ class MainWindow(QMainWindow):
     def _message_box_stylesheet(self) -> str:
         return message_box_stylesheet_util(self.theme)
 
-    def _update_progress_stylesheet(self) -> str:
-        return update_progress_stylesheet_util(self.theme)
 
     def _show_themed_message(
         self,
@@ -2226,7 +2210,7 @@ class MainWindow(QMainWindow):
 
     def _restore_cursor_state_after_modal(self) -> None:
         self._reset_cursor_state_after_modal()
-        QTimer.singleShot(0, self._restore_cursor_state_after_modal_deferred)
+        QTimer.singleShot(0, self, self._restore_cursor_state_after_modal_deferred)
 
     def show_info(self, title: str, text: str) -> None:
         self._show_themed_message(
@@ -2268,199 +2252,31 @@ class MainWindow(QMainWindow):
             buttons=QMessageBox.Retry | QMessageBox.Close, default_button=QMessageBox.Close)
         return response == QMessageBox.Retry
 
-    def ask_update_install_preference(
-        self,
-        *,
-        latest_version: str,
-        details_text: str = "",
-        install_supported: bool = True,
-    ) -> tuple[bool, bool]:
-        dialog = QDialog(self)
-        with self._transient_dialog(dialog):
-            dialog.setModal(True)
-            dialog.setWindowTitle("Update available")
-            window_icon = self.windowIcon()
-            if not window_icon.isNull():
-                dialog.setWindowIcon(window_icon)
-            dialog.setStyleSheet(self._message_box_stylesheet())
+    def ask_update_install_preference(self, *, latest_version: str, details_text: str = "", install_supported: bool = True) -> tuple[bool, bool]:
+        return ask_update_install_preference(self, latest_version=latest_version, details_text=details_text, install_supported=install_supported)
 
-            layout = QVBoxLayout(dialog)
-            layout.setContentsMargins(self._sp(14), self._sp(12), self._sp(14), self._sp(12))
-            layout.setSpacing(self._sp(10))
-
-            title = QLabel(f"Version {str(latest_version or 'latest')} is available.", dialog)
-            title.setStyleSheet(f"font: 700 {self._sp(9)}pt 'Segoe UI';")
-            layout.addWidget(title)
-
-            auto_install_checkbox = QCheckBox("Install update automatically", dialog)
-            auto_install_checkbox.setChecked(bool(install_supported))
-            auto_install_checkbox.setEnabled(bool(install_supported))
-            layout.addWidget(auto_install_checkbox)
-
-            mode_hint = QLabel("", dialog)
-            mode_hint.setWordWrap(True)
-            mode_hint.setStyleSheet(f"font: 600 {self._sp(8)}pt 'Segoe UI';")
-
-            def _refresh_hint() -> None:
-                if auto_install_checkbox.isEnabled() and auto_install_checkbox.isChecked():
-                    mode_hint.setText(
-                        "OpenPiano will download, verify, install the update, and relaunch automatically."
-                    )
-                else:
-                    if auto_install_checkbox.isEnabled():
-                        mode_hint.setText(
-                            "OpenPiano will open the download page so you can install the update manually."
-                        )
-                    else:
-                        mode_hint.setText(
-                            "Automatic install is unavailable here. OpenPiano will open the download page."
-                        )
-
-            auto_install_checkbox.toggled.connect(lambda _checked=False: _refresh_hint())
-            _refresh_hint()
-            layout.addWidget(mode_hint)
-
-            extra = str(details_text or "").strip()
-            if extra:
-                details_label = QLabel(extra, dialog)
-                details_label.setWordWrap(True)
-                details_label.setStyleSheet(f"font: 600 {self._sp(8)}pt 'Segoe UI';")
-                layout.addWidget(details_label)
-
-            buttons = QHBoxLayout()
-            buttons.setContentsMargins(0, 0, 0, 0)
-            buttons.setSpacing(self._sp(8))
-            buttons.addStretch(1)
-            later_button = QPushButton("Not now", dialog)
-            continue_button = QPushButton("Update", dialog)
-            continue_button.setDefault(True)
-            buttons.addWidget(later_button)
-            buttons.addWidget(continue_button)
-            layout.addLayout(buttons)
-
-            later_button.clicked.connect(dialog.reject)
-            continue_button.clicked.connect(dialog.accept)
-
-            self._apply_update_checkbox_styles(dialog)
-            apply_dialog_button_cursors_util(dialog)
-            self._apply_windows_title_bar_theme(dialog)
-            accepted = dialog.exec() == QDialog.Accepted
-            auto_install = bool(auto_install_checkbox.isEnabled() and auto_install_checkbox.isChecked())
-            return accepted, auto_install
-
-    def ask_update_handoff(
-        self,
-        *,
-        version: str,
-        default_restart: bool = True,
-        requires_elevation: bool = False,
-    ) -> tuple[bool, bool]:
-        dialog = QDialog(self)
-        with self._transient_dialog(dialog):
-            dialog.setModal(True)
-            dialog.setWindowTitle("Install update")
-            window_icon = self.windowIcon()
-            if not window_icon.isNull():
-                dialog.setWindowIcon(window_icon)
-            dialog.setStyleSheet(self._message_box_stylesheet())
-
-            layout = QVBoxLayout(dialog)
-            layout.setContentsMargins(self._sp(14), self._sp(12), self._sp(14), self._sp(12))
-            layout.setSpacing(self._sp(10))
-
-            title = QLabel("Update is ready to install", dialog)
-            title.setStyleSheet(f"font: 700 {self._sp(9)}pt 'Segoe UI';")
-            body = QLabel(
-                (
-                    f"OpenPiano v{str(version or 'latest')} has been downloaded.\n\n"
-                    "The installer will now take over.\n\n"
-                    "Click Update to close OpenPiano and begin installation."
-                ),
-                dialog,
-            )
-            body.setWordWrap(True)
-            body.setStyleSheet(f"font: 600 {self._sp(8)}pt 'Segoe UI';")
-            uac_hint = QLabel(
-                "Windows may ask for administrator permission to continue this update.",
-                dialog,
-            )
-            uac_hint.setWordWrap(True)
-            uac_hint.setStyleSheet(f"font: 600 {self._sp(8)}pt 'Segoe UI';")
-            uac_hint.setVisible(bool(requires_elevation))
-
-            restart_checkbox = QCheckBox("Restart OpenPiano after update", dialog)
-            restart_checkbox.setChecked(bool(default_restart))
-
-            buttons = QHBoxLayout()
-            buttons.setContentsMargins(0, 0, 0, 0)
-            buttons.setSpacing(self._sp(8))
-            buttons.addStretch(1)
-            abort_button = QPushButton("Abort", dialog)
-            continue_button = QPushButton("Update", dialog)
-            continue_button.setDefault(True)
-            buttons.addWidget(abort_button)
-            buttons.addWidget(continue_button)
-
-            layout.addWidget(title)
-            layout.addWidget(body)
-            layout.addWidget(uac_hint)
-            layout.addWidget(restart_checkbox)
-            layout.addLayout(buttons)
-
-            abort_button.clicked.connect(dialog.reject)
-            continue_button.clicked.connect(dialog.accept)
-
-            self._apply_update_checkbox_styles(dialog)
-            apply_dialog_button_cursors_util(dialog)
-            self._apply_windows_title_bar_theme(dialog)
-            accepted = dialog.exec() == QDialog.Accepted
-            restart = bool(restart_checkbox.isChecked())
-            return accepted, restart
+    def ask_update_handoff(self, *, version: str, default_restart: bool = True, requires_elevation: bool = False) -> tuple[bool, bool]:
+        return ask_update_handoff(self, version=version, default_restart=default_restart, requires_elevation=requires_elevation)
 
     def show_update_progress(self, title: str, text: str, *, allow_cancel: bool = True) -> None:
-        dialog = self._update_progress_dialog
-        if dialog is None:
-            dialog = QProgressDialog(self)
-            dialog.setWindowModality(Qt.ApplicationModal)
+        dialog = get_update_dialog(self)
+        if not getattr(dialog, "_openpiano_cancel_connected", False):
             dialog.canceled.connect(self.updateProgressCanceled.emit)
-            dialog.setMinimumDuration(0)
-            dialog.setAutoClose(False)
-            dialog.setAutoReset(False)
-            dialog.setRange(0, 100)
-            dialog.setValue(0)
-            window_icon = self.windowIcon()
-            if not window_icon.isNull():
-                dialog.setWindowIcon(window_icon)
-            dialog.setStyleSheet(self._update_progress_stylesheet())
-            self._apply_windows_title_bar_theme(dialog)
-            self._update_progress_dialog = dialog
-        if allow_cancel:
-            dialog.setCancelButtonText("Cancel")
-        else:
-            dialog.setCancelButton(None)
-        dialog.setWindowTitle(str(title or "Updating"))
-        dialog.setLabelText(str(text or ""))
+            dialog._openpiano_cancel_connected = True
+        self._update_progress_dialog = dialog
+        dialog.set_progress(0, text)
+        dialog.set_cancel_enabled(allow_cancel)
         dialog.show()
-        dialog.raise_()
-        dialog.activateWindow()
 
     def set_update_progress(self, value: int, text: str = "") -> None:
-        dialog = self._update_progress_dialog
-        if dialog is None:
-            return
-        clamped = max(0, min(100, int(value)))
-        if text:
-            dialog.setLabelText(str(text))
-        dialog.setValue(clamped)
-        dialog.repaint()
+        if self._update_progress_dialog is not None:
+            self._update_progress_dialog.set_progress(value, text)
 
     def close_update_progress(self) -> None:
         dialog = self._update_progress_dialog
-        if dialog is None:
-            return
         self._update_progress_dialog = None
-        dialog.close()
-        dialog.deleteLater()
+        if dialog is not None:
+            dialog.hide()
 
     def _build_layout_demo_widget(self, rows: tuple[tuple[str, ...], ...], parent: QWidget) -> QWidget:
         container = QWidget(parent)

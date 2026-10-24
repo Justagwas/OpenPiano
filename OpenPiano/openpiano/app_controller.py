@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+
 import sys
 import threading
 import time
@@ -10,8 +11,9 @@ from typing import Callable
 
 from PySide6.QtCore import QEvent, QObject, QTimer, Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QKeyEvent, QMouseEvent
-from PySide6.QtWidgets import QApplication, QFileDialog
+from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
+from .ui.update_dialog import get_update_dialog, show_update_failure, show_update_notice
 from openpiano.core.audio_engine import AudioEngineProtocol, FluidSynthAudioEngine, SilentAudioEngine
 from openpiano.core.audio_levels import normalize_volume
 from openpiano.core.preset_families import default_program_selection
@@ -36,6 +38,7 @@ from openpiano.core.config import (
 from openpiano.core.instrument_registry import (
     InstrumentInfo,
     discover_instruments,
+    is_hifi_piano,
     localappdata_fonts_dir,
     select_fallback_instrument,
 )
@@ -123,8 +126,10 @@ class PianoAppController(QObject):
         recorder_factory: RecorderFactory | None = None,
         settings_path: Path | None = None,
         icon_path: Path | None = None,
+        startup_status: Callable[[str], None] | None = None,
     ) -> None:
         super().__init__()
+        report_startup = startup_status or (lambda _message: None)
         self._app = app
         self._audio_factory = audio_factory or FluidSynthAudioEngine
         self._instrument_provider = instrument_provider or discover_instruments
@@ -141,6 +146,7 @@ class PianoAppController(QObject):
         self._pianoDownloadReady.connect(self._finish_piano_download, Qt.ConnectionType.QueuedConnection)
         self._settings_save_error_shown = False
 
+        report_startup("Loading saved preferences...")
         settings = load_settings(self._settings_path)
         self._mode: PianoMode = settings.mode
         self._volume = float(settings.volume)
@@ -253,6 +259,7 @@ class PianoAppController(QObject):
         self._midiDropdownRefreshReady.connect(self._finish_midi_dropdown_refresh)
         self._recordingSaveReady.connect(self._finish_recording_save)
 
+        report_startup("Preparing MIDI input...")
         self._midi_manager = self._midi_manager_factory(self._queue_midi_note_on, self._queue_midi_note_off)
         event_callback = getattr(self._midi_manager, 'set_event_callback', None)
         if callable(event_callback):
@@ -268,6 +275,7 @@ class PianoAppController(QObject):
         self._midi_dropdown_refresh_id = 0
         self._recorder = self._recorder_factory()
         self._recording_save_active = False
+        self._update_take_saved = False
         self._recording_save_stop_event = threading.Event()
         self._recording_save_thread = None
         self._recording_started_at = 0.0
@@ -294,6 +302,7 @@ class PianoAppController(QObject):
             resolved_icon = next((path for path in candidates if path.exists()), candidates[-1] if candidates else None)
         else:
             resolved_icon = icon_path
+        report_startup("Building the piano interface...")
         self.window = MainWindow(
             theme=effective_theme,
             icon_path=resolved_icon,
@@ -329,9 +338,12 @@ class PianoAppController(QObject):
         self._apply_ui_state_to_window()
         self.window.set_recording_elapsed(0)
 
+        report_startup("Starting the audio engine...")
         self._init_audio_engine()
+        report_startup("Finding available instruments...")
         self._refresh_instruments()
         self._apply_startup_instrument()
+        report_startup("Checking MIDI devices...")
         self._refresh_midi_inputs()
         self._restore_midi_input_device(persist=False, show_warning=False)
 
@@ -641,8 +653,8 @@ class PianoAppController(QObject):
             return
         self._piano_download_active = False
         if "path" in result:
-            self._piano_download_installed = True
             self._refresh_instruments()
+            self._piano_download_installed = True
             status = "Downloaded and imported. Select Steinway D-274 Hi-Fi in the Instrument list."
         elif result.get("cancelled"):
             status = "Download cancelled. You can try again when ready."
@@ -890,6 +902,14 @@ class PianoAppController(QObject):
             _ = exc
         self._instrument_by_id = {item.id: item for item in self._instruments}
         self.window.set_instruments(self._instruments, self._instrument_id)
+        self._piano_download_installed = any(is_hifi_piano(item) for item in self._instruments)
+        if not self._piano_download_active:
+            self.window.set_piano_download_state(
+                available=self._piano_download_spec is not None,
+                installed=self._piano_download_installed,
+                status=("Select Steinway D-274 Hi-Fi in the Instrument list."
+                        if self._piano_download_installed else ""),
+            )
 
     def _apply_startup_instrument(self) -> None:
         if not self._instruments:
@@ -1436,6 +1456,7 @@ class PianoAppController(QObject):
             self.window.set_recording_state(active=False, has_take=self._recorder.has_take())
             return
         if bool(active):
+            self._update_take_saved = False
             self._recorder.start()
             self._ensure_stats_timer()
             self._recording_started_at = time.monotonic()
@@ -1461,12 +1482,15 @@ class PianoAppController(QObject):
         if not self._recorder.has_take():
             self.window.show_info("Recording", "No recording available to save.")
             return
-        path_text, selected_filter = QFileDialog.getSaveFileName(
-            self.window,
-            "Save Recording",
-            str(Path.home() / f"{APP_NAME}_Take.mid"),
-            "MIDI / WAV Files (*.mid *.wav);;MIDI Files (*.mid);;WAV Files (*.wav)",
-        )
+        try:
+            path_text, selected_filter = QFileDialog.getSaveFileName(
+                self.window,
+                "Save Recording",
+                str(Path.home() / f"{APP_NAME}_Take.mid"),
+                "MIDI / WAV Files (*.mid *.wav);;MIDI Files (*.mid);;WAV Files (*.wav)",
+            )
+        finally:
+            self.window._restore_cursor_state_after_modal()
         if not path_text:
             return
         destination = destination_with_selected_suffix(path_text, selected_filter)
@@ -1531,6 +1555,7 @@ class PianoAppController(QObject):
         if bool(result.get("cancelled")):
             return
         if bool(result.get("ok")):
+            self._update_take_saved = True
             self.window.show_info("Recording", "Recording saved.")
             return
         error = str(result.get("error") or "Unknown error")
@@ -2907,13 +2932,12 @@ class PianoAppController(QObject):
             return
 
     def _on_update_install_handoff_requested(self, payload: dict[str, object]) -> None:
-        if self._is_shutdown:
+        if self._is_shutdown or self._update_stop_event.is_set():
             self._update_handoff_continue = False
             self._update_handoff_event.set()
             return
         version = str(payload.get("version") or "")
         requires_elevation = bool(payload.get("requires_elevation", False))
-        self.window.set_update_progress(99, "Ready to hand off to the installer. Waiting for your confirmation...")
         continue_update, restart_after = self.window.ask_update_handoff(
             version=version,
             default_restart=True,
@@ -2968,18 +2992,12 @@ class PianoAppController(QObject):
 
         if status == "up_to_date":
             if manual:
-                self.window.show_info(
-                    "Up to Date",
-                    "You are already on the latest version.",
-                )
+                show_update_notice(self.window, "You are up to date", "You are using the latest version of OpenPiano.")
             return
 
         if manual:
             message = str(result.get("error", "Unknown error"))
-            self.window.show_warning(
-                "Update Check Failed",
-                f"Could not check for updates:\n{message}",
-            )
+            self._finish_update_install({"status": "error", "error": "Could not check for updates.\n" + message})
 
     def _finish_update_install(self, payload: dict[str, object]) -> None:
         if self._is_shutdown:
@@ -2990,17 +3008,9 @@ class PianoAppController(QObject):
         status = str(payload.get("status", "error"))
         if status == "canceled":
             self.window.close_update_progress()
-            self.window.show_info(
-                "Update Canceled",
-                "Update was canceled before installation started.",
-            )
             return
         if status == "aborted":
             self.window.close_update_progress()
-            self.window.show_info(
-                "Update Canceled",
-                "Update was aborted. No installer was launched.",
-            )
             return
         if status == "ready":
             version = str(payload.get("version") or "")
@@ -3014,24 +3024,41 @@ class PianoAppController(QObject):
                     100,
                     f"Handing off to installer for v{version or 'latest'}...",
                 )
-            QTimer.singleShot(250, self.window.close)
+            QTimer.singleShot(0, self.window.close)
             return
         self.window.close_update_progress()
         message = str(payload.get("error", "Unknown error"))
-        self.window.show_warning(
-            "Update Install Failed",
-            f"Could not install update:\n{message}",
-        )
-        fallback_url = str(payload.get("url") or OFFICIAL_WEBSITE_URL).strip()
-        if not fallback_url:
-            return
-        open_fallback = self.window.ask_yes_no(
-            "Update Install Failed",
-            "Would you like to open the download page instead?",
-            default_yes=True,
-        )
-        if open_fallback:
-            QDesktopServices.openUrl(QUrl(fallback_url))
+        choice = show_update_failure(self.window, message, retry=True)
+        if choice == "manual":
+            QDesktopServices.openUrl(QUrl(str(payload.get("url") or OFFICIAL_WEBSITE_URL)))
+        elif choice == "retry":
+            QTimer.singleShot(0, lambda: self._trigger_update_check(manual=True))
+
+    def _update_blocked_reason(self) -> str:
+        if self._recorder.is_recording or self._recording_save_active or self._piano_download_active or self._audio_handoff:
+            return "Finish the current recording, export or instrument download before installing the update. Choose Cancel to return to OpenPiano."
+        return ""
+
+    def _confirm_update_recording(self) -> bool:
+        if not self._recorder.has_take() or self._update_take_saved:
+            return True
+        prompt = QMessageBox(self.window)
+        with self.window._transient_dialog(prompt):
+            prompt.setOption(QMessageBox.Option.DontUseNativeDialog, True)
+            prompt.setWindowTitle("Save recording before updating?")
+            prompt.setWindowIcon(self.window.windowIcon())
+            prompt.setText("This recording has not been saved. Save it before installing the update?")
+            prompt.setTextFormat(Qt.TextFormat.PlainText)
+            prompt.setStandardButtons(QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel)
+            prompt.setDefaultButton(QMessageBox.Save)
+            prompt.setStyleSheet(get_update_dialog(self.window).styleSheet())
+            answer = prompt.exec()
+        if answer == QMessageBox.Save:
+            self._on_save_recording_requested()
+            return False
+        if answer == QMessageBox.Discard:
+            return True
+        return False
 
     @staticmethod
     def _safe_call(action: Callable[[], None]) -> None:
@@ -3086,6 +3113,8 @@ class PianoAppController(QObject):
         self._safe_call(self._persist_settings_now)
 
     def run(self) -> None:
+        self.window._update_install_gate = self._update_blocked_reason
+        self.window._update_install_confirm = self._confirm_update_recording
         self.window.show_at_position_or_centered(self._window_x, self._window_y)
         QTimer.singleShot(400, self._post_startup_prompts)
 
