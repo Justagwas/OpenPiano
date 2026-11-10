@@ -3,6 +3,17 @@ from __future__ import annotations
 import ctypes
 import sys
 
+from openpiano.core.audio_errors import AudioOutputUnavailable
+
+
+def require_output_device() -> None:
+    if sys.platform == 'win32':
+        winmm = ctypes.WinDLL('winmm')
+        winmm.waveOutGetNumDevs.argtypes = []
+        winmm.waveOutGetNumDevs.restype = ctypes.c_uint
+        if winmm.waveOutGetNumDevs() == 0:
+            raise AudioOutputUnavailable()
+
 WINDOWS_OUTPUT_DRIVERS: tuple[str, ...] = ("wasapi", "dsound", "waveout")
 
 

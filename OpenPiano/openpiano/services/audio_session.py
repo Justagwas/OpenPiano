@@ -82,6 +82,11 @@ class AudioSession(QObject):
         with self._condition:
             return self._terminal_error
 
+    @property
+    def can_retry_output(self) -> bool:
+        with self._condition:
+            return not self._closing and self._terminal_error is None and callable(getattr(self._current, 'restart_output', None))
+
     def accept(self, result) -> bool:
         with self._condition:
             if self._closing or self._terminal_error is not None or result is not self._ready or result.request.serial != self._serial:
@@ -143,6 +148,11 @@ class AudioSession(QObject):
     def _prepare(self, request, cancel):
         candidate = self._factory()
         try:
+            if cancel.is_set():
+                raise InterruptedError('Audio preparation cancelled.')
+            check_output = getattr(candidate, 'check_output_available', None)
+            if callable(check_output):
+                check_output()
             candidate.set_master_volume(request.volume)
             if isinstance(candidate, FluidSynthAudioEngine):
                 candidate.set_instrument(request.path, bank=request.bank, preset=request.preset, stop_event=cancel)
@@ -152,7 +162,10 @@ class AudioSession(QObject):
                 raise InterruptedError('SoundFont loading cancelled.')
             start = getattr(candidate, 'start_output', None)
             if callable(start):
-                start()
+                if isinstance(candidate, FluidSynthAudioEngine):
+                    start(stop_event=cancel)
+                else:
+                    start()
             if cancel.is_set():
                 raise InterruptedError('SoundFont loading cancelled.')
             return candidate

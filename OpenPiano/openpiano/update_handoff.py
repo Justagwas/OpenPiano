@@ -1,21 +1,72 @@
 from __future__ import annotations
 
 import ctypes
-import hashlib
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import time
-import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
-PRODUCT = "OpenPiano"
+if __package__:
+    from .update_product import PRODUCT
+else:
+    from update_product import PRODUCT
 _ARMED: Path | None = None
+_MAINTENANCE_PENDING = False
 _VERSION = re.compile(r"^\d+\.\d+\.\d+$")
+
+from ctypes import wintypes
+
+
+def sha256_blocks(blocks):
+    dll = ctypes.WinDLL("bcrypt")
+    handle_type = ctypes.c_void_p
+    dll.BCryptOpenAlgorithmProvider.argtypes = [ctypes.POINTER(handle_type), wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.ULONG]
+    dll.BCryptCreateHash.argtypes = [handle_type, ctypes.POINTER(handle_type), ctypes.c_void_p, wintypes.ULONG, ctypes.c_void_p, wintypes.ULONG, wintypes.ULONG]
+    dll.BCryptHashData.argtypes = [handle_type, ctypes.c_char_p, wintypes.ULONG, wintypes.ULONG]
+    dll.BCryptFinishHash.argtypes = [handle_type, ctypes.c_void_p, wintypes.ULONG, wintypes.ULONG]
+    dll.BCryptDestroyHash.argtypes = [handle_type]
+    dll.BCryptCloseAlgorithmProvider.argtypes = [handle_type, wintypes.ULONG]
+    for name in ("BCryptOpenAlgorithmProvider", "BCryptCreateHash", "BCryptHashData", "BCryptFinishHash", "BCryptDestroyHash", "BCryptCloseAlgorithmProvider"):
+        getattr(dll, name).restype = wintypes.LONG
+    def check(status):
+        if status:
+            raise OSError("Windows SHA-256 failed: 0x%08X" % (status & 0xffffffff))
+    provider, digest = handle_type(), handle_type()
+    check(dll.BCryptOpenAlgorithmProvider(ctypes.byref(provider), "SHA256", None, 0))
+    try:
+        check(dll.BCryptCreateHash(provider, ctypes.byref(digest), None, 0, None, 0, 0))
+        try:
+            for block in blocks:
+                if block:
+                    check(dll.BCryptHashData(digest, block, len(block), 0))
+            result = ctypes.create_string_buffer(32)
+            check(dll.BCryptFinishHash(digest, result, 32, 0))
+            return result.raw.hex()
+        finally:
+            dll.BCryptDestroyHash(digest)
+    finally:
+        dll.BCryptCloseAlgorithmProvider(provider, 0)
+
+
+
+
+def copy_file(source, destination):
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CopyFileW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.BOOL]
+    kernel.CopyFileW.restype = wintypes.BOOL
+    if not kernel.CopyFileW(str(source), str(destination), True):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
+def open_url(url):
+    shell = ctypes.WinDLL("shell32", use_last_error=True)
+    shell.ShellExecuteW.argtypes = [wintypes.HWND, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.LPCWSTR, ctypes.c_int]
+    shell.ShellExecuteW.restype = ctypes.c_void_p
+    return (shell.ShellExecuteW(None, "open", url, None, None, 1) or 0) > 32
 
 
 def state_root() -> Path:
@@ -49,7 +100,7 @@ def _retry_state_io(operation, *args):
 
 def write_state(path: Path, data: dict) -> None:
     _plain_path(path)
-    temporary = _plain_path(path.with_name(path.stem + "." + uuid.uuid4().hex + ".tmp"))
+    temporary = _plain_path(path.with_name(path.stem + "." + os.urandom(16).hex() + ".tmp"))
     handle = temporary.open("x", encoding="utf-8", newline="\n")
     try:
         with handle:
@@ -77,6 +128,29 @@ def read_state(path: Path) -> dict:
     if not isinstance(data, dict) or data.get("product") != PRODUCT:
         raise RuntimeError("Update record belongs to another application.")
     return data
+
+
+@contextmanager
+def state_lease(path: Path, *, root: Path | None = None):
+    path = _plain_path(path)
+    if path.parent != _plain_path(root if root is not None else state_root()) or not re.fullmatch(r"[0-9a-f]{32}\.json", path.name):
+        raise RuntimeError("The update record is outside application storage.")
+    lock = _plain_path(path.with_suffix('.lease'))
+    stream = lock.open('a+b')
+    try:
+        if not stream.tell():
+            stream.write(b'\0')
+            stream.flush()
+        stream.seek(0)
+        import msvcrt
+        msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+        try:
+            yield
+        finally:
+            stream.seek(0)
+            msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+    finally:
+        stream.close()
 
 
 def file_version(path: Path) -> str:
@@ -121,22 +195,91 @@ def guarded_package(path: Path):
 
 
 def verify_package(stream, sha256: str, size: int) -> None:
-    if not re.fullmatch(r"[0-9a-f]{64}", sha256) or size <= 0:
+    if not isinstance(sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", sha256) or type(size) is not int or size <= 0:
         raise RuntimeError("Update integrity information is invalid.")
     if os.fstat(stream.fileno()).st_size != size:
         raise RuntimeError("The installer size changed before installation.")
     stream.seek(0)
-    digest = hashlib.sha256()
-    for block in iter(lambda: stream.read(256 * 1024), b""):
-        digest.update(block)
-    if digest.hexdigest() != sha256:
+    if sha256_blocks(iter(lambda: stream.read(256 * 1024), b"")) != sha256:
         raise RuntimeError("The installer changed before installation.")
+
+
+
+def normalize_completion_notes(notes):
+    if not isinstance(notes, (list, tuple)):
+        return []
+    normalized = []
+    for note in notes:
+        if isinstance(note, str) and note.strip():
+            normalized.append(note.strip()[:2000])
+            if len(normalized) == 64:
+                break
+    return normalized
+
+
+def stage_runtime(install: Path, staging: Path) -> None:
+    manifest_path = _plain_path(install / "update-runtime.json")
+    with guarded_package(manifest_path) as manifest_stream:
+        payload = manifest_stream.read(256 * 1024 + 1)
+    if len(payload) > 256 * 1024:
+        raise RuntimeError("The updater runtime manifest is too large.")
+    manifest = json.loads(payload.decode("utf-8"))
+    if not isinstance(manifest, dict) or type(manifest.get("format")) is not int or manifest.get("format") != 1 or manifest.get("product") != PRODUCT:
+        raise RuntimeError("The updater runtime manifest does not match this application.")
+    if manifest.get('version') != file_version(install / (PRODUCT + '.exe')):
+        raise RuntimeError("The updater runtime does not match the installed version.")
+    helper = install / 'UpdateHelper.exe'
+    with guarded_package(helper) as helper_stream:
+        helper_size = os.fstat(helper_stream.fileno()).st_size
+        verify_package(helper_stream, manifest.get('helper_sha256', ''), helper_size)
+        helper_copy = _plain_path(staging / 'UpdateHelper.exe')
+        copy_file(helper, helper_copy)
+        with guarded_package(helper_copy) as copy_stream:
+            verify_package(copy_stream, manifest['helper_sha256'], helper_size)
+    entries = manifest.get("files")
+    if not isinstance(entries, list) or not 1 <= len(entries) <= 64:
+        raise RuntimeError("The updater runtime manifest has an invalid file list.")
+    validated, seen, total = [], set(), 0
+    for entry in entries:
+        if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
+            raise RuntimeError("The updater runtime entry is invalid.")
+        relative = Path(entry["path"])
+        if relative.is_absolute() or relative.drive or len(relative.parts) < 2 or relative.parts[0] != "_internal" or any(part in {"..", "."} or ":" in part or part.endswith((' ', '.')) for part in relative.parts):
+            raise RuntimeError("The updater runtime path is outside the application bundle.")
+        key = os.path.normcase(str(relative))
+        if key in seen:
+            raise RuntimeError("The updater runtime manifest contains duplicate paths.")
+        seen.add(key)
+        size, expected_hash = entry.get("size"), entry.get("sha256")
+        if type(size) is not int or not 0 < size <= 64 * 1024 * 1024 or not isinstance(expected_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_hash):
+            raise RuntimeError("The updater runtime integrity information is invalid.")
+        total += size
+        if total > 256 * 1024 * 1024:
+            raise RuntimeError("The updater runtime exceeds its size limit.")
+        source = _plain_path(install / relative)
+        if not source.is_file():
+            raise RuntimeError("An updater runtime file is missing.")
+        destination = _plain_path(staging / relative)
+        if destination.exists():
+            raise RuntimeError("The updater runtime destination already exists.")
+        validated.append((source, destination, expected_hash, size))
+    required = {os.path.normcase(str(Path("_internal") / f"python{sys.version_info.major}{sys.version_info.minor}.dll")), os.path.normcase(str(Path("_internal") / "base_library.zip"))}
+    if not required.issubset(seen):
+        raise RuntimeError("The updater runtime manifest is incomplete.")
+    for source, destination, expected_hash, size in validated:
+        with guarded_package(source) as source_stream:
+            verify_package(source_stream, expected_hash, size)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            _plain_path(destination.parent)
+            copy_file(source, destination)
+            with guarded_package(destination) as destination_stream:
+                verify_package(destination_stream, expected_hash, size)
 
 
 def arm_update(*, setup_path: Path, sha256: str, size: int, version: str,
                current_version: str, notes, install_dir: Path, mode: str,
                restart: bool, staging_root: Path) -> None:
-    global _ARMED
+    global _ARMED, _MAINTENANCE_PENDING
     if _ARMED is not None:
         raise RuntimeError("An update is already waiting to install.")
     if os.name != "nt" or not getattr(sys, "frozen", False):
@@ -165,16 +308,14 @@ def arm_update(*, setup_path: Path, sha256: str, size: int, version: str,
     helper_copy = _plain_path(staging / "UpdateHelper.exe")
     if helper_copy.exists():
         raise RuntimeError("This update has already been handed off.")
-    shutil.copyfile(helper, helper_copy)
-    if hashlib.sha256(helper.read_bytes()).digest() != hashlib.sha256(helper_copy.read_bytes()).digest():
-        raise RuntimeError("The update helper could not be copied safely.")
+    stage_runtime(install, staging)
     root = _plain_path(state_root())
     root.mkdir(parents=True, exist_ok=True)
-    record = root / (uuid.uuid4().hex + ".json")
+    record = root / (os.urandom(16).hex() + ".json")
     data = dict(product=PRODUCT, state="arming", parent_pid=os.getpid(),
                 bootloader_pid=os.getppid(), staging=str(staging), setup=str(setup),
                 sha256=sha256.lower(), size=int(size), previous_version=current_version,
-                version=version, notes=[str(n).strip()[:2000] for n in (notes if isinstance(notes, (list, tuple)) else ()) if str(n).strip()][:64],
+                version=version, notes=normalize_completion_notes(notes),
                 install_dir=str(install), mode=mode, restart=bool(restart), created=time.time())
     write_state(record, data)
     try:
@@ -194,11 +335,12 @@ def arm_update(*, setup_path: Path, sha256: str, size: int, version: str,
     except Exception:
         data.update(state="aborted")
         write_state(record, data)
+        _MAINTENANCE_PENDING = True
         raise
 
 
 def abort_pending_update() -> None:
-    global _ARMED
+    global _ARMED, _MAINTENANCE_PENDING
     if _ARMED is None:
         return
     path = _ARMED
@@ -206,6 +348,14 @@ def abort_pending_update() -> None:
     data["state"] = "aborted"
     write_state(path, data)
     _ARMED = None
+    _MAINTENANCE_PENDING = True
+
+
+def take_maintenance_request() -> bool:
+    global _MAINTENANCE_PENDING
+    pending = _MAINTENANCE_PENDING
+    _MAINTENANCE_PENDING = False
+    return pending
 
 
 def commit_pending_update() -> None:
@@ -232,7 +382,7 @@ def pending_completion(version: str) -> tuple[Path, dict] | None:
             try:
                 data = read_state(path)
                 if data.get("state") == "success" and data.get("version") == version:
-                    return path, data
+                    return path, {**data, "notes": normalize_completion_notes(data.get("notes"))}
             except (OSError, ValueError, RuntimeError):
                 continue
     except (OSError, RuntimeError):
@@ -288,6 +438,14 @@ def installer_arguments(data: dict, log: Path) -> list[str]:
 
 
 def run_transaction(record: Path) -> int:
+    try:
+        with state_lease(record):
+            return _run_transaction(record)
+    except (OSError, RuntimeError):
+        return 1
+
+
+def _run_transaction(record: Path) -> int:
     kernel, handles = None, []
     data = {}
     committed = False
@@ -299,6 +457,7 @@ def run_transaction(record: Path) -> int:
         data = read_state(record)
         if data.get("state") != "arming":
             return 1
+        data['helper_pid'] = os.getpid()
         staging, setup = _plain_path(Path(data["staging"])), _plain_path(Path(data["setup"]))
         install = _plain_path(Path(data["install_dir"]))
         if staging.parent != root.parent or setup.parent != staging or not re.fullmatch(PRODUCT.lower() + r"-update-[0-9a-f]{32}", staging.name):
@@ -339,6 +498,8 @@ def run_transaction(record: Path) -> int:
             data["state"] = "installing"
             write_state(record, data)
             process = subprocess.Popen([str(setup), *installer_arguments(data, record.with_suffix('.log'))], cwd=str(staging))
+            data['installer_pid'] = process.pid
+            write_state(record, data)
             code = process.wait()
             data["exit_code"] = code
             if code == 3010:
@@ -371,8 +532,7 @@ def run_transaction(record: Path) -> int:
         if committed or acknowledged:
             answer = ctypes.windll.user32.MessageBoxW(None, f"{exc}\n\nOpen the download page?", PRODUCT + " update", 0x14)
             if answer == 6:
-                import webbrowser
-                webbrowser.open("https://www.justagwas.com/projects/" + PRODUCT.lower() + "/download")
+                open_url("https://www.justagwas.com/projects/" + PRODUCT.lower() + "/download")
         return 1
     finally:
         if kernel is not None:

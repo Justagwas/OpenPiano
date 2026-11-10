@@ -6,7 +6,8 @@ import sys
 from pathlib import Path
 from typing import Protocol
 
-from openpiano.core.audio_output import default_output_driver, list_output_drivers, output_profiles
+from openpiano.core.audio_output import default_output_driver, list_output_drivers, output_profiles, require_output_device
+from openpiano.core.audio_errors import AudioOutputError
 from openpiano.core.audio_levels import normalize_volume, playback_gain
 from openpiano.core.audio_processing import start_protected_audio_driver
 from openpiano.core.config import DEFAULT_AUDIO_POLYPHONY
@@ -197,11 +198,14 @@ class FluidSynthAudioEngine:
             self.shutdown()
             raise
 
-    def start_output(self) -> None:
+    def check_output_available(self) -> None:
+        require_output_device()
+
+    def start_output(self, *, stop_event=None) -> None:
         if self._closed:
             raise RuntimeError('Audio engine is closed.')
         if not self._output_started:
-            self._output_driver = self._start_synth(self._output_driver)
+            self._output_driver = self._start_synth(self._output_driver, stop_event=stop_event)
             self._output_started = True
 
     def stop_output(self) -> None:
@@ -296,11 +300,20 @@ class FluidSynthAudioEngine:
         self._output_profile = dict(kwargs)
         return driver or str(self._synth.get_setting('audio.driver') or '')
 
-    def _start_synth(self, preferred_driver: str | None = None) -> str:
+    def _start_synth(self, preferred_driver: str | None = None, *, stop_event=None) -> str:
+        self.check_output_available()
         last_error: Exception | None = None
         for kwargs in self._start_driver_attempts(preferred_driver):
+            if stop_event is not None and stop_event.is_set():
+                raise InterruptedError('Audio startup cancelled.')
             try:
                 return self._start_synth_with_kwargs(kwargs)
+            except AudioOutputError as exc:
+                if not exc.allows_fallback:
+                    raise
+                last_error = exc
+            except InterruptedError:
+                raise
             except Exception as exc:
                 last_error = exc
         if last_error is not None:
@@ -597,9 +610,9 @@ class FluidSynthAudioEngine:
         try:
             self._output_driver = self._start_synth(target)
             self._output_started = True
-        except Exception:
+        except Exception as exc:
             self._output_driver = previous
-            if was_started:
+            if was_started and not isinstance(exc, InterruptedError) and not (isinstance(exc, AudioOutputError) and not exc.allows_fallback):
                 try:
                     self._output_driver = (self._start_synth_with_kwargs(previous_profile)
                         if previous_profile is not None else self._start_synth(previous))

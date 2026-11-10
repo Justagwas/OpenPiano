@@ -14,6 +14,7 @@ from PySide6.QtGui import QDesktopServices, QKeyEvent, QMouseEvent
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
 from .ui.update_dialog import get_update_dialog, show_update_failure, show_update_notice
+from openpiano.core.audio_errors import AudioOutputError
 from openpiano.core.audio_engine import AudioEngineProtocol, FluidSynthAudioEngine, SilentAudioEngine
 from openpiano.core.audio_levels import normalize_volume
 from openpiano.core.preset_families import default_program_selection
@@ -52,15 +53,16 @@ from openpiano.core.keymap import (
     extract_custom_keybind_overrides,
     get_note_labels,
     normalize_mouse_binding,
-    normalize_key_event,
-    normalize_key_event_layout_scancode,
-    normalize_key_event_qwerty_scancode,
+    binding_reserved_reason,
+    normalize_key_event_physical,
+    normalize_scan_code,
+    is_keypad_scan_code,
+    refresh_keyboard_labels,
     serialize_custom_keybind_payload,
 )
 from openpiano.core.keybind_remap import (
     apply_overrides,
     build_default_keybind_map_full,
-    translate_keybind_map,
 )
 from openpiano.core.music_logic import clamp_transposed_note
 from openpiano.core.midi_input import MidiInputEvent, MidiInputManager
@@ -78,6 +80,7 @@ from openpiano.core.settings_store import (
 from openpiano.core.stats_logic import collect_stats_values, trim_kps_events
 from openpiano.core.theme import apply_key_color_overrides, get_theme
 from openpiano.services.midi_routing import MidiRoutingService
+from openpiano.services.keyboard_layout import KeyboardLayoutMonitor
 from openpiano.services.note_lifecycle import NoteLifecycleService
 from openpiano.services.audio_session import AudioSession
 from openpiano.services.piano_download import PianoDownloadService, d274_download_spec
@@ -177,8 +180,7 @@ class PianoAppController(QObject):
         self._black_key_pressed_color = settings.black_key_pressed_color
         self._window_x = settings.window_x
         self._window_y = settings.window_y
-        self._keyboard_input_mode = settings.keyboard_input_mode
-        self._keyboard_layout_choice_seen = bool(settings.keyboard_layout_choice_seen)
+        refresh_keyboard_labels()
         self._space_override_off = False
         self._pedal_state = PedalState()
         self._midi_input_epoch = 0
@@ -188,19 +190,26 @@ class PianoAppController(QObject):
         self._mouse_button_bindings: dict[int, Binding] = {}
         self._ignore_mouse_until_release = False
         self._sustain_gate_percent = 0.0 if self._is_sustain_temporarily_off() else 100.0
-        self._default_keybind_map_full = build_default_keybind_map_full(self._keyboard_input_mode)
+        self._default_keybind_map_full = build_default_keybind_map_full()
         self._custom_keybind_overrides = deserialize_custom_keybind_payload(settings.custom_keybinds)
+        self._retained_legacy_keybinds = {
+            note: value for note, value in settings.custom_keybinds.items()
+            if value is not None and (
+                int(note) not in self._custom_keybind_overrides
+                or (self._custom_keybind_overrides[int(note)][0] == "keyboard"
+                    and not self._custom_keybind_overrides[int(note)][1].startswith("scan:"))
+            )
+        }
         self._keybind_committed_map_full = apply_overrides(
             self._default_keybind_map_full,
             self._custom_keybind_overrides,
         )
-        self._keybind_staging_map_full: dict[int, Binding] = dict(self._keybind_committed_map_full)
+        self._keybind_staging_map_full: dict[int, Binding | None] = dict(self._keybind_committed_map_full)
         self._keybind_edit_active = False
         self._keybind_selected_note: int | None = None
-        self._keybind_edit_undo_stack: list[tuple[int, Binding]] = []
-        self._keyboard_layout_prompt_active = False
+        self._keybind_edit_undo_stack: list[dict[int, Binding | None]] = []
 
-        self._mapping: dict[int, Binding] = {}
+        self._mapping: dict[int, Binding | None] = {}
         self._binding_to_notes: dict[Binding, tuple[int, ...]] = {}
         self._note_labels: dict[int, str] = {}
         self._keys: list[int] = []
@@ -348,6 +357,7 @@ class PianoAppController(QObject):
         self._restore_midi_input_device(persist=False, show_warning=False)
 
         self._app.installEventFilter(self)
+        self._keyboard_layout_monitor = KeyboardLayoutMonitor(self._app, self, self._refresh_keyboard_layout)
         self.window.piano_widget.installEventFilter(self)
         self._app.aboutToQuit.connect(self.shutdown)
         self._refresh_stats_ui()
@@ -370,7 +380,7 @@ class PianoAppController(QObject):
         self.window.showKeyLabelsChanged.connect(self._on_show_key_labels_changed)
         self.window.showNoteLabelsChanged.connect(self._on_show_note_labels_changed)
         self.window.changeKeybindsRequested.connect(self._on_change_keybinds_requested)
-        self.window.changeKeyboardLayoutRequested.connect(self._on_change_keyboard_layout_requested)
+        self.window.resetKeybindsRequested.connect(self._on_reset_keybinds_requested)
         self.window.doneKeybindsRequested.connect(self._on_done_keybinds_requested)
         self.window.discardKeybindsRequested.connect(self._on_discard_keybinds_requested)
         self.window.keybindEditActionBlocked.connect(self._on_keybind_edit_action_blocked)
@@ -522,7 +532,7 @@ class PianoAppController(QObject):
         self._audio_request = None
         self.window.set_audio_loading('')
         self.window.set_instruments(self._instruments, self._instrument_id)
-        if result.request.startup and not self._startup_fallback_attempted:
+        if result.request.startup and not self._startup_fallback_attempted and not isinstance(result.error, AudioOutputError):
             self._startup_fallback_attempted = True
             fallback = select_fallback_instrument(self._instruments)
             if fallback is not None and fallback.id != result.request.instrument_id:
@@ -557,7 +567,8 @@ class PianoAppController(QObject):
             return
         self._stop_all_notes(preserve_pedal=True)
         self.audio_available = False
-        self._audio_handoff = True
+        self.audio_engine = SilentAudioEngine()
+        self._audio_handoff = False
         if self.window.ask_audio_retry(detail):
             self._retry_audio()
 
@@ -568,11 +579,14 @@ class PianoAppController(QObject):
             self._stop_all_notes(preserve_pedal=True)
         self._audio_handoff = True
         instrument = self._instrument_by_id.get(self._instrument_id)
-        if instrument is None or not callable(getattr(self.audio_engine, 'restart_output', None)):
+        if instrument is None or not self._audio_session.can_retry_output:
             fallback = instrument or select_fallback_instrument(self._instruments)
             if fallback is not None:
-                self._apply_instrument_selection(fallback.id, fallback.default_bank, fallback.default_preset,
-                    persist=False, startup=True)
+                bank = self._instrument_bank if instrument is not None else fallback.default_bank
+                preset = self._instrument_preset if instrument is not None else fallback.default_preset
+                self._apply_instrument_selection(fallback.id, bank, preset, persist=False, startup=True)
+            else:
+                self._audio_handoff = False
             return
         self._audio_request = self._audio_session.request(instrument.id, str(instrument.path),
             self._instrument_bank, self._instrument_preset, self._volume, retry=True)
@@ -1046,6 +1060,8 @@ class PianoAppController(QObject):
             return False
         if self._instrument_id == "builtin:default.sf3":
             bank, preset = default_program_selection(bank, preset)
+        if not self.audio_available and self._instrument_id:
+            return self._apply_instrument_selection(self._instrument_id, bank, preset, persist)
         if not self._instrument_id:
             self._instrument_bank = max(0, min(16383, int(bank)))
             self._instrument_preset = max(0, min(127, int(preset)))
@@ -1094,7 +1110,7 @@ class PianoAppController(QObject):
         self,
         mode: PianoMode,
         persist: bool,
-        mapping_full: dict[int, Binding] | None = None,
+        mapping_full: dict[int, Binding | None] | None = None,
     ) -> None:
         self._mode = mode
         full_map = mapping_full if mapping_full is not None else self._keybind_committed_map_full
@@ -1245,13 +1261,20 @@ class PianoAppController(QObject):
         self._apply_mode(self._mode, persist=False, mapping_full=self._keybind_staging_map_full)
         self.window.piano_widget.set_label_visibility(True, self._show_note_labels)
         self._set_keybind_editor_status(
-            "Select a key on the piano, then press a keyboard combo or mouse combo. Press Save or Discard when finished. Ctrl+Z undoes the last change.",
+            "Select a piano key, then press a keyboard or mouse combination. Delete clears its binding. Ctrl+Z undoes the last change. Choose Save or Discard when finished.",
         )
         self.window.piano_widget.setFocus()
 
     def _on_done_keybinds_requested(self) -> None:
         if not self._keybind_edit_active:
             return
+        changed_notes = {
+            note for note, binding in self._keybind_staging_map_full.items()
+            if binding != self._keybind_committed_map_full.get(note)
+        }
+        changed_notes.update(note for change in self._keybind_edit_undo_stack for note in change)
+        for note in changed_notes:
+            self._retained_legacy_keybinds.pop(str(note), None)
         self._keybind_committed_map_full = dict(self._keybind_staging_map_full)
         self._custom_keybind_overrides = extract_custom_keybind_overrides(
             self._default_keybind_map_full,
@@ -1259,6 +1282,31 @@ class PianoAppController(QObject):
         )
         self._finish_keybind_edit("")
         self._persist_settings_now()
+
+    def _on_reset_keybinds_requested(self) -> None:
+        if self._tutorial_active:
+            return
+        if not self._keybind_edit_active:
+            self._on_change_keybinds_requested()
+        pending_edits = {note for change in self._keybind_edit_undo_stack for note in change}
+        previous = {
+            note: self._keybind_staging_map_full[note]
+            for note, default in self._default_keybind_map_full.items()
+            if self._keybind_staging_map_full[note] != default
+            or (str(note) in self._retained_legacy_keybinds and note not in pending_edits)
+        }
+        if previous:
+            self._keybind_edit_undo_stack.append(previous)
+            self._keybind_staging_map_full = dict(self._default_keybind_map_full)
+            self._apply_mode(self._mode, persist=False, mapping_full=self._keybind_staging_map_full)
+            self.window.piano_widget.set_keybind_edit_mode(True, self._keybind_selected_note)
+        self._set_keybind_editor_status(
+            "All 61-key and 88-key bindings are set to defaults. Choose Save to apply or Discard to cancel. Ctrl+Z undoes the reset."
+            if previous else
+            "All 61-key and 88-key bindings already use defaults. Choose Save or Discard when finished.",
+        )
+        self.window.ensure_settings_target_visible(self.window.keybind_hint_label)
+        self.window.piano_widget.setFocus()
 
     def _on_discard_keybinds_requested(self) -> None:
         if not self._keybind_edit_active:
@@ -1284,32 +1332,39 @@ class PianoAppController(QObject):
         self.window.piano_widget.set_selected_keybind_note(self._keybind_selected_note)
         note_label = self._note_labels.get(self._keybind_selected_note, f"MIDI {self._keybind_selected_note}")
         binding = self._keybind_staging_map_full.get(self._keybind_selected_note)
-        binding_label = binding_to_inline_label(binding) if binding is not None else "None"
+        binding_label = binding_to_inline_label(binding) if binding is not None else "Unassigned"
+        if str(note) in self._retained_legacy_keybinds and not any(
+            note in change for change in self._keybind_edit_undo_stack
+        ):
+            self._set_keybind_editor_status(
+                f"{note_label}: the older binding could not be matched to a physical key. Press a new combination, or Delete to clear it.",
+            )
+            return
         self._set_keybind_editor_status(
-            f"{note_label} selected. Press a combo to assign. Current: {binding_label}",
+            f"{note_label} selected. Press a combination to assign, or Delete to clear. Current: {binding_label}",
         )
 
-    def _assign_binding_to_selected_note(self, binding: Binding) -> bool:
+    def _assign_binding_to_selected_note(self, binding: Binding | None) -> bool:
         if not self._keybind_edit_active or self._keybind_selected_note is None:
             return False
         target_note = int(self._keybind_selected_note)
         if target_note not in self._keybind_staging_map_full:
             return False
         previous_binding = self._keybind_staging_map_full[target_note]
-        if binding == previous_binding:
+        if binding == previous_binding and str(target_note) not in self._retained_legacy_keybinds:
             note_label = self._note_labels.get(target_note, f"MIDI {target_note}")
-            binding_label = binding_to_inline_label(binding)
+            binding_label = binding_to_inline_label(binding) if binding is not None else "Unassigned"
             self._set_keybind_editor_status(
                 f"{note_label} is already mapped to {binding_label}. Select another key or click Save/Discard.",
             )
             return True
-        self._keybind_edit_undo_stack.append((target_note, previous_binding))
+        self._keybind_edit_undo_stack.append({target_note: previous_binding})
         self._keybind_staging_map_full[target_note] = binding
         self._apply_mode(self._mode, persist=False, mapping_full=self._keybind_staging_map_full)
         self.window.piano_widget.set_keybind_edit_mode(True, target_note)
         self.window.piano_widget.set_selected_keybind_note(target_note)
         note_label = self._note_labels.get(target_note, f"MIDI {target_note}")
-        binding_label = binding_to_inline_label(binding)
+        binding_label = binding_to_inline_label(binding) if binding is not None else "Unassigned"
         self._set_keybind_editor_status(
             f"{note_label} mapped to {binding_label}. Select another key or click Save/Discard.",
         )
@@ -1321,14 +1376,20 @@ class PianoAppController(QObject):
         if not self._keybind_edit_undo_stack:
             self._set_keybind_editor_status("No keybind changes to undo. Press Save or Discard.")
             return True
-        note, previous_binding = self._keybind_edit_undo_stack.pop()
-        self._keybind_selected_note = int(note)
-        self._keybind_staging_map_full[self._keybind_selected_note] = previous_binding
+        previous = self._keybind_edit_undo_stack.pop()
+        self._keybind_staging_map_full.update(previous)
+        note = next(iter(previous))
+        if len(previous) == 1 and note in self._mapping:
+            self._keybind_selected_note = note
         self._apply_mode(self._mode, persist=False, mapping_full=self._keybind_staging_map_full)
         self.window.piano_widget.set_keybind_edit_mode(True, self._keybind_selected_note)
         self.window.piano_widget.set_selected_keybind_note(self._keybind_selected_note)
-        note_label = self._note_labels.get(self._keybind_selected_note, f"MIDI {self._keybind_selected_note}")
-        binding_label = binding_to_inline_label(previous_binding)
+        if len(previous) > 1:
+            self._set_keybind_editor_status("Reset undone. Previous bindings restored. Choose Save or Discard when finished.")
+            return True
+        note_label = self._note_labels.get(note, f"MIDI {note}")
+        previous_binding = previous[note]
+        binding_label = binding_to_inline_label(previous_binding) if previous_binding is not None else "Unassigned"
         self._set_keybind_editor_status(
             f"Undo applied. {note_label} reverted to {binding_label}. Press Save or Discard when finished.",
         )
@@ -1740,10 +1801,9 @@ class PianoAppController(QObject):
         self._black_key_pressed_color = defaults.black_key_pressed_color
         self._window_x = defaults.window_x
         self._window_y = defaults.window_y
-        self._keyboard_input_mode = defaults.keyboard_input_mode
-        self._keyboard_layout_choice_seen = defaults.keyboard_layout_choice_seen
-        self._default_keybind_map_full = build_default_keybind_map_full(self._keyboard_input_mode)
+        self._default_keybind_map_full = build_default_keybind_map_full()
         self._custom_keybind_overrides = {}
+        self._retained_legacy_keybinds = {}
         self._keybind_committed_map_full = dict(self._default_keybind_map_full)
         self._keybind_staging_map_full = dict(self._default_keybind_map_full)
         self._keybind_edit_active = False
@@ -1786,14 +1846,14 @@ class PianoAppController(QObject):
             return
         if self._ignore_mouse_until_release:
             return
-        if self._tutorial_active or self._keybind_edit_active or self._keyboard_layout_prompt_active:
+        if self._tutorial_active or self._keybind_edit_active:
             return
         self._current_mouse_base_note = int(base_note)
         self._activate_mouse_source(self._current_mouse_base_note)
 
     def _on_mouse_note_released(self, _base_note: int) -> None:
         self._ignore_mouse_until_release = False
-        if self._tutorial_active or self._keybind_edit_active or self._keyboard_layout_prompt_active:
+        if self._tutorial_active or self._keybind_edit_active:
             return
         self._release_mouse_source()
 
@@ -1802,7 +1862,7 @@ class PianoAppController(QObject):
             self._ignore_mouse_until_release = False
         if self._audio_handoff or self._ignore_mouse_until_release:
             return
-        if self._tutorial_active or self._keybind_edit_active or self._keyboard_layout_prompt_active:
+        if self._tutorial_active or self._keybind_edit_active:
             return
         if base_note is None:
             self._current_mouse_base_note = None
@@ -1865,7 +1925,7 @@ class PianoAppController(QObject):
         return is_descendant_of(focus, self.window)
 
     def _should_route_piano_key_event(self, event: QKeyEvent) -> bool:
-        if self._tutorial_active or self._keybind_edit_active or self._keyboard_layout_prompt_active:
+        if self._tutorial_active or self._keybind_edit_active:
             return True
         if int(event.key()) in {int(Qt.Key.Key_Tab), int(Qt.Key.Key_Backtab)}:
             return False
@@ -1873,6 +1933,8 @@ class PianoAppController(QObject):
         return focus is None or focus is self.window or focus is self.window.piano_widget
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:              
+        if event.type() == QEvent.ApplicationActivate:
+            self._refresh_keyboard_layout()
         if watched is self.window and event.type() == QEvent.Close:
             self.shutdown()
             return False
@@ -1933,8 +1995,6 @@ class PianoAppController(QObject):
         self._on_transpose_changed(self._transpose + delta)
 
     def _handle_key_press_event(self, event: QKeyEvent) -> bool:
-        if self._keyboard_layout_prompt_active:
-            return True
         key = int(event.key())
         if self._tutorial_active:
             if key == int(Qt.Key.Key_Escape) and not event.isAutoRepeat():
@@ -1950,25 +2010,37 @@ class PianoAppController(QObject):
                 and int(event.key()) == int(Qt.Key.Key_Z)
             ):
                 return self._undo_last_keybind_assignment()
+            if key == int(Qt.Key.Key_Delete) and not self._is_keypad_event(event):
+                if self._keybind_selected_note is None:
+                    self._set_keybind_editor_status("Select a piano key first, then press Delete to clear its binding.")
+                else:
+                    self._assign_binding_to_selected_note(None)
+                return True
             binding = self._binding_from_key_event(event)
             if binding is None:
-                if self._keybind_selected_note is None:
-                    self._set_keybind_editor_status("Select a piano key first, then press a combo.")
+                self._set_keybind_editor_status("This key cannot be assigned. Select a piano key and press another combination.")
+                return True
+            reserved = binding_reserved_reason(binding)
+            if reserved:
+                self._set_keybind_editor_status(reserved)
+                return True
+            if self._keybind_selected_note is None:
+                self._set_keybind_editor_status("Select a piano key first, then press a combination.")
                 return True
             self._assign_binding_to_selected_note(binding)
             return True
         if key in {int(Qt.Key.Key_Tab), int(Qt.Key.Key_Backtab)}:
             return True
-        if key == int(Qt.Key.Key_Left):
+        if key == int(Qt.Key.Key_Left) and not self._is_keypad_event(event):
             self._step_transpose(-1)
             return True
-        if key == int(Qt.Key.Key_Right):
+        if key == int(Qt.Key.Key_Right) and not self._is_keypad_event(event):
             self._step_transpose(+1)
             return True
-        if key == int(Qt.Key.Key_Up):
+        if key == int(Qt.Key.Key_Up) and not self._is_keypad_event(event):
             self._step_volume(+0.02)
             return True
-        if key == int(Qt.Key.Key_Down):
+        if key == int(Qt.Key.Key_Down) and not self._is_keypad_event(event):
             self._step_volume(-0.02)
             return True
 
@@ -2000,8 +2072,6 @@ class PianoAppController(QObject):
         return handled
 
     def _handle_key_release_event(self, event: QKeyEvent) -> bool:
-        if self._keyboard_layout_prompt_active:
-            return True
         key = int(event.key())
         if self._tutorial_active:
             return True
@@ -2014,7 +2084,7 @@ class PianoAppController(QObject):
             int(Qt.Key.Key_Right),
             int(Qt.Key.Key_Up),
             int(Qt.Key.Key_Down),
-        }:
+        } and not self._is_keypad_event(event):
             return True
 
         if key == int(Qt.Key.Key_Space):
@@ -2042,15 +2112,17 @@ class PianoAppController(QObject):
         return handled
 
     @staticmethod
+    def _is_keypad_event(event: QKeyEvent) -> bool:
+        return bool(event.modifiers() & Qt.KeypadModifier) or is_keypad_scan_code(int(event.nativeScanCode()))
+
+    @staticmethod
     def _event_keycodes(event: QKeyEvent) -> tuple[int, ...]:
-        native = int(event.nativeScanCode())
+        native = normalize_scan_code(int(event.nativeScanCode()))
+        if native:
+            return ((1 << 32) | native,)
         key = int(event.key())
-        codes: list[int] = []
-        if native > 0:
-            codes.append(native)
-        if key > 0 and key not in codes:
-            codes.append(key)
-        return tuple(codes)
+        keypad = bool(event.modifiers() & Qt.KeypadModifier)
+        return ((1 << 33) | (int(keypad) << 30) | key,) if key > 0 else ()
 
     @staticmethod
     def _normalize_keycodes(keycodes: int | tuple[int, ...]) -> tuple[int, ...]:
@@ -2064,32 +2136,41 @@ class PianoAppController(QObject):
         return tuple(normalized)
 
     def _binding_from_key_event(self, event: QKeyEvent) -> Binding | None:
-        text = event.text()
-        key_name = self._key_name_from_event(event)
         modifiers = event.modifiers()
-        shift = bool(modifiers & Qt.ShiftModifier)
-        ctrl = bool(modifiers & Qt.ControlModifier)
-        alt = bool(modifiers & Qt.AltModifier)
-        native_scan_code = int(event.nativeScanCode())
-        if self._keyboard_input_mode == "qwerty":
-            mapped = normalize_key_event_qwerty_scancode(
-                native_scan_code,
-                shift=shift,
-                ctrl=ctrl,
-                alt=alt,
+        if modifiers & Qt.MetaModifier:
+            return None
+        native = int(event.nativeScanCode())
+        if native:
+            return normalize_key_event_physical(
+                native,
+                shift=bool(modifiers & Qt.ShiftModifier),
+                ctrl=bool(modifiers & Qt.ControlModifier),
+                alt=bool(modifiers & Qt.AltModifier),
             )
-            if mapped is not None:
-                return mapped
+        key = int(event.key())
+        named_keys = {
+            int(Qt.Key.Key_Space): "space", int(Qt.Key.Key_Tab): "tab",
+            int(Qt.Key.Key_Backtab): "tab", int(Qt.Key.Key_Escape): "escape",
+            int(Qt.Key.Key_Delete): "delete", int(Qt.Key.Key_Backspace): "backspace",
+            int(Qt.Key.Key_Left): "left", int(Qt.Key.Key_Right): "right",
+            int(Qt.Key.Key_Up): "up", int(Qt.Key.Key_Down): "down",
+            int(Qt.Key.Key_Return): "return", int(Qt.Key.Key_Enter): "enter",
+            int(Qt.Key.Key_Insert): "insert", int(Qt.Key.Key_Home): "home",
+            int(Qt.Key.Key_End): "end", int(Qt.Key.Key_PageUp): "pageup",
+            int(Qt.Key.Key_PageDown): "pagedown",
+        }
+        if int(Qt.Key.Key_F1) <= key <= int(Qt.Key.Key_F24):
+            key_name = f"f{key - int(Qt.Key.Key_F1) + 1}"
         else:
-            mapped = normalize_key_event_layout_scancode(
-                native_scan_code,
-                shift=shift,
-                ctrl=ctrl,
-                alt=alt,
-            )
-            if mapped is not None:
-                return mapped
-        return normalize_key_event(text, key_name, shift=shift, ctrl=ctrl, alt=alt)
+            key_name = named_keys.get(key) or self._key_name_from_event(event)
+        return normalize_key_event_physical(
+            int(event.nativeScanCode()),
+            shift=bool(modifiers & Qt.ShiftModifier),
+            ctrl=bool(modifiers & Qt.ControlModifier),
+            alt=bool(modifiers & Qt.AltModifier),
+            key_name=key_name,
+            keypad=bool(modifiers & Qt.KeypadModifier),
+        )
 
     def _handle_keybind_mouse_press_event(self, event: QMouseEvent) -> bool:
         if not self._keybind_edit_active:
@@ -2676,9 +2757,7 @@ class PianoAppController(QObject):
             black_key_pressed_color=self._black_key_pressed_color,
             window_x=self._window_x,
             window_y=self._window_y,
-            keyboard_input_mode=self._keyboard_input_mode,
-            keyboard_layout_choice_seen=self._keyboard_layout_choice_seen,
-            custom_keybinds=serialize_custom_keybind_payload(self._custom_keybind_overrides),
+            custom_keybinds={**self._retained_legacy_keybinds, **serialize_custom_keybind_payload(self._custom_keybind_overrides)},
         )
         try:
             save_settings(settings, self._settings_path)
@@ -2692,76 +2771,12 @@ class PianoAppController(QObject):
                 f"OpenPiano could not save your settings.\n\n{exc}",
             )
 
-    def _maybe_prompt_keyboard_input_mode(self) -> None:
-        if self._is_shutdown or self._keyboard_layout_choice_seen:
+    def _refresh_keyboard_layout(self) -> None:
+        if self._is_shutdown or not refresh_keyboard_labels():
             return
-        app = QApplication.instance()
-        platform_name = str(app.platformName() if app is not None else "").strip().lower()
-        if platform_name in {"offscreen", "minimal", "minimalegl"}:
-            self._apply_keyboard_input_mode("layout", mark_choice_seen=True, persist_now=True)
-            return
-
-        self._prompt_keyboard_input_mode()
-
-    def _on_change_keyboard_layout_requested(self) -> None:
-        if self._tutorial_active or self._keybind_edit_active:
-            return
-        self._prompt_keyboard_input_mode()
-
-    def _prompt_keyboard_input_mode(self) -> None:
-        choice = self._ask_keyboard_input_mode_choice()
-        if choice is None:
-            return
-        self._apply_keyboard_input_mode(choice, mark_choice_seen=True, persist_now=True)
-
-    def _ask_keyboard_input_mode_choice(self) -> str | None:
-        self._keyboard_layout_prompt_active = True
-        self._stop_local_notes()
-        piano_widget = self.window.piano_widget
-        was_enabled = bool(piano_widget.isEnabled())
-        if was_enabled:
-            piano_widget.setEnabled(False)
-        try:
-            return self.window.ask_keyboard_input_mode_choice()
-        finally:
-            if was_enabled:
-                piano_widget.setEnabled(True)
-            self._keyboard_layout_prompt_active = False
-            self._stop_local_notes()
-            piano_widget.setFocus(Qt.ActiveWindowFocusReason)
-            self._refresh_stats_ui()
-
-    def _apply_keyboard_input_mode(self, choice: str | None, *, mark_choice_seen: bool, persist_now: bool) -> None:
-        target = "qwerty" if str(choice or "").strip().lower() == "qwerty" else "layout"
-        previous = self._keyboard_input_mode
-        target_default_keybinds = build_default_keybind_map_full(target)
-        should_translate = previous != target or target == "layout"
-        if should_translate:
-            self._stop_local_notes()
-            translated, overrides = translate_keybind_map(
-                previous_mode=previous,
-                target_mode=target,
-                current_map=self._keybind_committed_map_full,
-                previous_default_map=self._default_keybind_map_full,
-                target_default_map=target_default_keybinds,
-            )
-            self._keybind_committed_map_full = translated
-            self._keybind_staging_map_full = dict(self._keybind_committed_map_full)
-            self._default_keybind_map_full = target_default_keybinds
-            self._custom_keybind_overrides = overrides
-            self._keyboard_input_mode = target
-            self._apply_mode(self._mode, persist=False)
-            self._refresh_stats_ui()
-        else:
-            self._keyboard_input_mode = target
-            self._apply_mode(self._mode, persist=False)
-            self._refresh_stats_ui()
-        if mark_choice_seen:
-            self._keyboard_layout_choice_seen = True
-        if persist_now:
-            self._persist_settings_now()
-        else:
-            self._schedule_persist()
+        self.window.piano_widget.refresh_key_labels()
+        if self._keybind_edit_active and self._keybind_selected_note is not None:
+            self._on_keybind_note_selected(self._keybind_selected_note)
 
     def _on_window_moved(self) -> None:
         if self._is_shutdown or not self.window.isVisible() or self.window.isFullScreen():
@@ -3035,6 +3050,8 @@ class PianoAppController(QObject):
             QTimer.singleShot(0, lambda: self._trigger_update_check(manual=True))
 
     def _update_blocked_reason(self) -> str:
+        if self._audio_request is not None:
+            return "Wait for the instrument to finish loading before installing the update. Choose Cancel to return to OpenPiano."
         if self._recorder.is_recording or self._recording_save_active or self._piano_download_active or self._audio_handoff:
             return "Finish the current recording, export or instrument download before installing the update. Choose Cancel to return to OpenPiano."
         return ""
@@ -3071,6 +3088,7 @@ class PianoAppController(QObject):
         if self._is_shutdown:
             return
         self._is_shutdown = True
+        self._keyboard_layout_monitor.close()
         self._update_stop_event.set()
         self._recording_save_stop_event.set()
         self._piano_download_stop.set()
@@ -3130,7 +3148,6 @@ class PianoAppController(QObject):
         self._audio_startup_error = ""
 
     def _post_startup_prompts(self) -> None:
-        self._maybe_warn_audio_unavailable()
         if self._is_shutdown:
             return
-        self._maybe_prompt_keyboard_input_mode()
+        self._maybe_warn_audio_unavailable()

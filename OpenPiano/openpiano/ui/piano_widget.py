@@ -104,7 +104,8 @@ class PianoWidget(QWidget):
         self._piano_style = DEFAULT_PIANO_STYLE
         self._show_key_labels = True
         self._show_note_labels = True
-        self._mapping: dict[int, Binding] = {}
+        self._mapping: dict[int, Binding | None] = {}
+        self._key_labels: dict[int, str] = {}
         self._labels: dict[int, str] = {}
         self._notes: list[int] = []
         self._white_note_count = 0
@@ -209,9 +210,10 @@ class PianoWidget(QWidget):
         self.updateGeometry()
         self.update()
 
-    def set_mode(self, mode: "PianoMode", mapping: dict[int, Binding], labels: dict[int, str]) -> None:
+    def set_mode(self, mode: "PianoMode", mapping: dict[int, Binding | None], labels: dict[int, str]) -> None:
         self._mode = mode
         self._mapping = dict(mapping)
+        self.refresh_key_labels()
         self._labels = dict(labels)
         self._notes = sorted(self._mapping.keys())
         self._white_note_count = sum(1 for note in self._notes if not is_black_key(note))
@@ -223,6 +225,13 @@ class PianoWidget(QWidget):
         self.clear_effects()
         self._rebuild_geometry()
         self.updateGeometry()
+        self.update()
+
+    def refresh_key_labels(self) -> None:
+        self._key_labels = {
+            note: binding_to_label(binding) if binding is not None else ""
+            for note, binding in self._mapping.items()
+        }
         self.update()
 
     def set_keybind_edit_mode(self, active: bool, selected_note: int | None = None) -> None:
@@ -959,9 +968,8 @@ class PianoWidget(QWidget):
             painter.drawRoundedRect(selected_rect.adjusted(1.0, 1.0, -1.0, -1.0), self._sp(4), self._sp(4))
 
     def _draw_labels(self, painter: QPainter, note: int, rect: QRectF, black: bool) -> None:
-        binding = self._mapping.get(note)
         note_text = self._labels.get(note, "")
-        hotkey_text = binding_to_label(binding) if binding is not None else ""
+        hotkey_text = self._key_labels.get(note, "")
         if not self._show_key_labels:
             hotkey_text = ""
         if not self._show_note_labels:

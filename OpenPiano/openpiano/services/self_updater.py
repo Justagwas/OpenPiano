@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from ..update_handoff import arm_update
 
+from ..update_cleanup import PreparationLease, discard_staging, maintain_updates
+
 import hashlib
 import json
 import os
@@ -196,6 +198,7 @@ class PreparedUpdateVerification:
 
 @dataclass(slots=True)
 class PreparedUpdateInstall:
+    _preparation: PreparationLease | None = field(default=None, repr=False, compare=False, kw_only=True)
     latest_version: str
     setup_path: Path
     staging_root: Path
@@ -291,6 +294,7 @@ class SelfUpdater:
 
         _emit_progress(progress_callback, 0, "Preparing update...")
         target_root = self._create_staging_root()
+        protection = PreparationLease(target_root)
         try:
             setup_name = self._setup_filename_from_url(check_data.setup_url, check_data.latest_version)
             setup_path = target_root / setup_name
@@ -308,12 +312,14 @@ class SelfUpdater:
             _emit_progress(progress_callback, 100, "Verifying update package...")
             _emit_progress(progress_callback, 100, "Ready to install update.")
         except Exception:
-            self._remove_tree(target_root)
+            protection.close()
+            discard_staging(target_root, self._runtime_storage_dir)
             raise
         return PreparedUpdateInstall(
             latest_version=str(check_data.latest_version or ""),
             setup_path=setup_path,
             staging_root=target_root,
+            _preparation=protection,
             requires_elevation=(mode_arg == "/ALLUSERS"),
             verification=PreparedUpdateVerification(check_data.setup_sha256.lower(), check_data.setup_size),
             notes=tuple(check_data.notes),
@@ -349,15 +355,16 @@ class SelfUpdater:
                            current_version=self._app_version, notes=prepared.notes,
                            install_dir=self._install_dir, mode=self._installer_mode_arg(),
                            restart=restart_after_update, staging_root=prepared.staging_root)
+            if prepared._preparation is not None:
+                prepared._preparation.close()
         except Exception:
             self.discard_prepared_update(prepared)
             raise
 
     def discard_prepared_update(self, prepared: PreparedUpdateInstall) -> None:
-        try:
-            self._remove_tree(Path(prepared.staging_root))
-        except Exception:
-            return
+        if prepared._preparation is not None:
+            prepared._preparation.close()
+        discard_staging(Path(prepared.staging_root), self._runtime_storage_dir)
 
     def _create_staging_root(self) -> Path:
         self._runtime_storage_dir.mkdir(parents=True, exist_ok=True)
@@ -692,18 +699,7 @@ class SelfUpdater:
         return cleaned
 
     def _cleanup_old_payloads(self) -> None:
-        if not self._runtime_storage_dir.exists():
-            return
-        for child in self._runtime_storage_dir.iterdir():
-            if not child.is_dir() or not child.name.startswith(_UPDATE_STAGING_PREFIX):
-                continue
-            try:
-                age_seconds = max(0.0, time.time() - child.stat().st_mtime)
-            except Exception:
-                continue
-            if age_seconds < _UPDATE_STAGING_MAX_AGE_SECONDS:
-                continue
-            self._remove_tree(child)
+        maintain_updates(self._runtime_storage_dir)
 
     def _cleanup_legacy_updates_root(self) -> None:
         legacy_root = self._runtime_storage_dir / "updates"

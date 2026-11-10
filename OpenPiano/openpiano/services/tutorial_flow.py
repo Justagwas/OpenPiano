@@ -98,7 +98,7 @@ class TutorialFlowService:
             {
                 "id": "sound_velocity",
                 "title": "Velocity",
-                "body": "Velocity sets note attack strength for QWERTY and mouse input (1-127). External MIDI input keeps the velocity from your hardware.",
+                "body": "Velocity sets note attack strength for computer keyboard and mouse input (1-127). External MIDI input keeps the velocity from your hardware.",
                 "target": "sound_velocity",
                 "open_settings": True,
             },
@@ -112,14 +112,14 @@ class TutorialFlowService:
             {
                 "id": "keyboard_section",
                 "title": "Keyboard Settings",
-                "body": "Switch key range and toggle keyboard/note labels.",
+                "body": "Switch the key range and toggle keyboard/note labels. Keyboard labels follow your active Windows keyboard layout.",
                 "target": "keyboard_section",
                 "open_settings": True,
             },
             {
                 "id": "keyboard_keybinds",
                 "title": "Change Keybinds",
-                "body": "Click Change Keybinds to enter focused edit mode. While active, other controls are blocked. Select a piano key, press a keyboard/mouse combination, use Ctrl+Z to undo the last change, then press Save to apply or Discard to cancel.",
+                "body": "Click Change Keybinds to enter focused edit mode. Select a piano key, then press a keyboard key or combination to assign it. Delete clears its binding. Reset Keybinds restores defaults. Ctrl+Z undoes a change or reset. Choose Save to apply your changes or Discard to cancel.",
                 "target": "keyboard_keybinds",
                 "open_settings": True,
             },

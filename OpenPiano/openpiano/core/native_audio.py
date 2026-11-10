@@ -5,6 +5,7 @@ import sys
 import threading
 
 from openpiano.core.fluidsynth_loader import candidate_dll_dirs
+from openpiano.core.audio_errors import AudioOutputError
 
 _dll = None
 _checked = False
@@ -99,7 +100,7 @@ class NativeWasapiDriver:
         self.pointer = self.dll.op_wasapi_open(limiter.pointer, sample_rate, periods, device_id,
                                                int(getattr(limiter, '_diagnostic', False)), ctypes.byref(error))
         if not self.pointer:
-            raise RuntimeError(f'Could not start event-driven WASAPI (0x{error.value & 0xffffffff:08X}).')
+            raise AudioOutputError('Could not start event-driven WASAPI', error.value)
 
     def statistics(self) -> dict[str, int | float]:
         values = (ctypes.c_int64 * 16)()

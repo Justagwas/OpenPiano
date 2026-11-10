@@ -59,7 +59,7 @@ Choose a 61 or 88 key layout, personalize the controls and appearance, explore d
 ## Basic usage
 
 1. Get the [Windows installer or standalone app](https://www.justagwas.com/projects/openpiano/). Choose the installer for a normal setup, or standalone to run without installing.
-2. Launch OpenPiano and choose your computer-keyboard layout when prompted.
+2. Launch OpenPiano. Keyboard labels follow your active Windows keyboard layout.
 3. Choose the 61 or 88 key range under **Settings > Keyboard**.
 4. Play with the labeled computer keys, click or glide across the piano, or select a connected MIDI controller.
 5. Open **Controls** to choose an instrument or MIDI input. Use **Settings > Sound** to adjust volume, velocity (note strength), sustain, or transpose (pitch).
@@ -72,7 +72,11 @@ Save a take before starting another recording; a new take replaces the previous 
 
 ### Make the keyboard your own
 
-Show the note names or computer-key labels you need, then customize the mappings under **Settings > Keyboard > Change Keybinds**. Assign notes to different keys, undo an assignment with **Ctrl+Z**, and choose **Save** or **Discard** when finished.
+Show the note names or computer-key labels you need, then customize the mappings under **Settings > Keyboard > Change Keybinds**. Select a piano key and press a keyboard or mouse combination to assign it. Punctuation, function keys, and numpad keys are supported alongside letters and numbers. Press **Delete** to clear the selected binding, **Ctrl+Z** to undo, then **Save** or **Discard** when finished. Reserved controls are explained in the editor.
+
+The same physical keys keep playing the same notes when you switch keyboard layouts; only their labels change. You can assign one combination to several notes to play a chord.
+
+**Reset Keybinds** restores the default assignments for both key ranges. Review the reset with **Save** or **Discard**, or undo it with **Ctrl+Z**.
 
 The computer keyboard and mouse use the note strength set under **Settings > Sound**. A MIDI controller supplies its own note strength and can send sustain-pedal input. The [playing guide](https://github.com/Justagwas/OpenPiano/wiki/Playing-OpenPiano) explains sustain, transpose, and keyboard ranges.
 

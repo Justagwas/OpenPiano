@@ -4,7 +4,7 @@ import ctypes
 import re
 
 from PySide6.QtCore import QTimer, Qt, Signal
-from PySide6.QtWidgets import QCheckBox, QDialog, QHBoxLayout, QLabel, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QCheckBox, QDialog, QHBoxLayout, QLabel, QProgressBar, QPushButton, QSizePolicy, QVBoxLayout, QWidget
 
 from .modal_utils import RestoreCursorOnHide
 
@@ -60,17 +60,6 @@ class UpdateDialog(RestoreCursorOnHide, QDialog):
         self.available_notes.setTextFormat(Qt.TextFormat.PlainText)
         self.available_notes.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.body_layout.addWidget(self.available_notes)
-        self.notes = QLabel(self)
-        self.notes.setWordWrap(True)
-        self.notes.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-        self.notes.setTextFormat(Qt.TextFormat.PlainText)
-        self.notes.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.notes_area = QScrollArea(self)
-        self.notes_area.setWidgetResizable(True)
-        self.notes_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.notes_area.setFrameShape(QScrollArea.Shape.NoFrame)
-        self.notes_area.setWidget(self.notes)
-        self.body_layout.addWidget(self.notes_area)
         self.progress = QProgressBar(self)
         self.progress.setRange(0, 100)
         self.progress.setFormat("%p%")
@@ -94,7 +83,7 @@ class UpdateDialog(RestoreCursorOnHide, QDialog):
         self.buttons.addWidget(self.manual_button)
         self.buttons.addWidget(self.primary_button)
         self.layout_box.addLayout(self.buttons)
-        for label in (self.title, self.detail, self.notes):
+        for label in (self.title, self.detail, self.available_notes):
             label.setTextFormat(Qt.TextFormat.PlainText)
         for button in (self.manual_button, self.cancel_button, self.primary_button):
             button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -119,10 +108,8 @@ class UpdateDialog(RestoreCursorOnHide, QDialog):
         self.buttons.setSpacing(round(8 * scale))
         self.setMinimumWidth(round(420 * scale))
         self.available_notes.setMinimumHeight(round(80 * scale))
-        self.notes_area.setMinimumHeight(round(32 * scale))
-        self.notes_area.setMaximumHeight(round(64 * scale))
         self.setStyleSheet(f"""
-QDialog, QScrollArea, QScrollArea QWidget {{ background: {palette['bg']}; color: {palette['text']}; }}
+QDialog {{ background: {palette['bg']}; color: {palette['text']}; }}
 QLabel {{ background: transparent; color: {palette['text']}; font: 600 {8 * scale:.1f}pt 'Segoe UI'; }}
 QLabel#title {{ font: 700 {9 * scale:.1f}pt 'Segoe UI'; }}
 QLabel#detail {{ color: {palette['muted']}; }}
@@ -132,7 +119,7 @@ QPushButton:focus {{ border-color: {palette['accent']}; }}
 QPushButton:hover {{ background: {palette['accent']}; color: {palette['text']}; }}
 QPushButton:disabled {{ background: {palette['disabled']}; color: {palette['disabled_text']}; }}
 QPushButton#manualDownloadLink {{ background: transparent; color: {palette['text']}; border: 1px solid transparent; border-radius: 0; padding: {round(2 * scale)}px; font: 600 {8 * scale:.1f}pt 'Segoe UI'; text-decoration: underline; }}
-QPushButton#manualDownloadLink:hover, QPushButton#manualDownloadLink:focus {{ color: {palette['accent']}; border-color: {palette['accent']}; }}
+QPushButton#manualDownloadLink:hover, QPushButton#manualDownloadLink:focus {{ color: {palette['accent']}; }}
 QProgressBar {{ background: {palette['track']}; color: {palette['text']}; border: 1px solid {palette['border']}; border-radius: {round(6 * scale)}px; min-height: {round(18 * scale)}px; text-align: center; }}
 QProgressBar::chunk {{ background: {palette['success']}; border-radius: {round(5 * scale)}px; }}
 """)
@@ -158,7 +145,7 @@ QProgressBar::chunk {{ background: {palette['success']}; border-radius: {round(5
         minimum = self.minimumSizeHint()
         width = max(self.minimumWidth(), minimum.width())
         height = max(round(160 * self._scale), minimum.height())
-        if self.state == "available":
+        if self.state in {"available", "complete"}:
             height = max(height, self.layout_box.totalHeightForWidth(width))
         self.resize(width, height)
 
@@ -192,7 +179,6 @@ QProgressBar::chunk {{ background: {palette['success']}; border-radius: {round(5
         self.detail.setText(detail)
         self.detail.setVisible(bool(detail))
         self.available_notes.hide()
-        self.notes_area.hide()
         self.progress.hide()
         self.restart_checkbox.hide()
         self.manual_button.hide()
@@ -213,6 +199,7 @@ QProgressBar::chunk {{ background: {palette['success']}; border-radius: {round(5
         self.cancel_button.setEnabled(True)
         self.primary_button.setDefault(True)
         self.apply_appearance()
+        self.primary_button.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def available(self, version, details, supported):
         self._configure("available", "Update available", f"Installed: v{APP_VERSION}   |   Available: v{version}")
@@ -248,14 +235,14 @@ QProgressBar::chunk {{ background: {palette['success']}; border-radius: {round(5
     def _refresh_gate(self):
         reason = str(self._gate() or "") if self._gate is not None else ""
         self.primary_button.setEnabled(not reason)
-        detail = f"{PRODUCT} will close while the update is installed."
+        detail = f"{PRODUCT} will close during installation. A separate installer window will show the progress."
         if getattr(self, "_requires_elevation", False):
             detail += " Windows may ask for permission to install the update."
         self.detail.setText(reason or detail)
         return not reason
 
     def ready(self, version, restart=True, elevation=False):
-        self._configure("ready", "Ready to install", f"{PRODUCT} v{version} has been downloaded and checked.")
+        self._configure("ready", f"Ready to install v{version}", f"{PRODUCT} will close during installation.")
         self.restart_checkbox.setChecked(restart)
         self.restart_checkbox.show()
         self.primary_button.setText("Install update")
@@ -288,6 +275,8 @@ QProgressBar::chunk {{ background: {palette['success']}; border-radius: {round(5
 
 
 def get_update_dialog(parent) -> UpdateDialog:
+    from .update_maintenance import start_update_maintenance
+    start_update_maintenance(parent)
     dialog = getattr(parent, "_unified_update_dialog", None)
     if dialog is None:
         dialog = UpdateDialog(parent)
@@ -322,6 +311,8 @@ def show_update_failure(parent, message, *, retry=False):
 
 
 def show_update_completion(parent):
+    from .update_maintenance import start_update_maintenance
+    start_update_maintenance(parent)
     pending = pending_completion(APP_VERSION)
     if pending is None:
         return
@@ -329,8 +320,8 @@ def show_update_completion(parent):
     dialog = get_update_dialog(parent)
     dialog._configure("complete", "Updated to v" + APP_VERSION, PRODUCT + " is up to date.")
     notes = [str(note).strip() for note in data.get("notes", []) if str(note).strip()]
-    dialog.notes.setText("What's new\n" + "\n".join("- " + note for note in notes))
-    dialog.notes_area.setVisible(bool(notes))
+    dialog.available_notes.setText("What's new\n" + "\n".join("- " + note for note in notes))
+    dialog.available_notes.setVisible(bool(notes))
     dialog.primary_button.setText("Continue")
     dialog.cancel_button.hide()
     dialog._fit_content()

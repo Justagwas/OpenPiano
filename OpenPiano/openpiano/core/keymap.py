@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import sys
+from functools import lru_cache
 from typing import Literal, TypeAlias
 
 BindingSource: TypeAlias = Literal["keyboard", "mouse"]
 Binding: TypeAlias = tuple[BindingSource, str, bool, bool, bool]
 BindingSpec: TypeAlias = str | tuple[str, str]
 PianoMode: TypeAlias = Literal["61", "88"]
-KeyboardInputMode: TypeAlias = Literal["layout", "qwerty"]
+KEYBIND_SCHEMA_VERSION = 2
 
 MIDI_START_61 = 36
 MIDI_END_61 = 96
@@ -148,22 +149,6 @@ MOUSE_BUTTONS = {
     "x2",
 }
 
-MODIFIER_KEYNAMES = {
-    "shift",
-    "shift_l",
-    "shift_r",
-    "control",
-    "control_l",
-    "control_r",
-    "ctrl",
-    "alt",
-    "alt_l",
-    "alt_r",
-    "meta",
-    "super_l",
-    "super_r",
-}
-
 _QWERTY_SCANCODE_TO_TOKEN = {
     0x02: "1",
     0x03: "2",
@@ -217,13 +202,6 @@ _DISPLAY_KEY_NAMES_VERBOSE = {
     "x2": "Forward mouse button (X2)",
 }
 
-KEYBOARD_DEMO_ROWS: tuple[tuple[str, ...], ...] = (
-    ("1", "2", "3", "4", "5", "6", "7", "8", "9", "0"),
-    ("q", "w", "e", "r", "t", "y", "u", "i", "o", "p"),
-    ("a", "s", "d", "f", "g", "h", "j", "k", "l"),
-    ("z", "x", "c", "v", "b", "n", "m"),
-)
-
 _TOKEN_TO_QWERTY_SCANCODE = {token: scan for scan, token in _QWERTY_SCANCODE_TO_TOKEN.items()}
 
 
@@ -231,6 +209,12 @@ def _normalize_keyboard_token(value: str) -> str | None:
     token = str(value or "").strip().lower()
     if not token:
         return None
+    if token.startswith("scan:"):
+        try:
+            scan = normalize_scan_code(int(token[5:], 16))
+        except ValueError:
+            return None
+        return physical_key_token(scan) if scan in _PHYSICAL_KEY_NAMES else None
     if len(token) == 1 and token.isalnum():
         return token
     if len(token) == 1 and token in SHIFTED_DIGIT_SYMBOLS:
@@ -315,26 +299,29 @@ def binding_from_id(value: str) -> Binding | None:
     )
 
 
-def serialize_custom_keybind_payload(bindings: dict[int, Binding]) -> dict[str, str]:
-    payload: dict[str, str] = {}
+def serialize_custom_keybind_payload(bindings: dict[int, Binding | None]) -> dict[str, str | None]:
+    payload: dict[str, str | None] = {}
     for note in sorted(bindings.keys()):
         binding = bindings[note]
         if note < MIDI_START_88 or note > MIDI_END_88:
             continue
-        payload[str(note)] = binding_to_id(binding)
+        payload[str(note)] = binding_to_id(binding) if binding is not None else None
     return payload
 
 
-def deserialize_custom_keybind_payload(payload: object) -> dict[int, Binding]:
+def deserialize_custom_keybind_payload(payload: object) -> dict[int, Binding | None]:
     if not isinstance(payload, dict):
         return {}
-    parsed: dict[int, Binding] = {}
+    parsed: dict[int, Binding | None] = {}
     for note_raw, binding_raw in payload.items():
         try:
             note = int(str(note_raw).strip())
         except Exception:
             continue
         if note < MIDI_START_88 or note > MIDI_END_88:
+            continue
+        if binding_raw is None:
+            parsed[note] = None
             continue
         if not isinstance(binding_raw, str):
             continue
@@ -345,7 +332,7 @@ def deserialize_custom_keybind_payload(payload: object) -> dict[int, Binding]:
     return parsed
 
 
-def apply_custom_keybinds(base_mapping: dict[int, Binding], overrides: dict[int, Binding]) -> dict[int, Binding]:
+def apply_custom_keybinds(base_mapping: dict[int, Binding | None], overrides: dict[int, Binding | None]) -> dict[int, Binding | None]:
     merged = dict(base_mapping)
     for note, binding in overrides.items():
         if note in merged:
@@ -353,21 +340,22 @@ def apply_custom_keybinds(base_mapping: dict[int, Binding], overrides: dict[int,
     return merged
 
 
-def extract_custom_keybind_overrides(base_mapping: dict[int, Binding], mapping: dict[int, Binding]) -> dict[int, Binding]:
-    overrides: dict[int, Binding] = {}
+def extract_custom_keybind_overrides(base_mapping: dict[int, Binding | None], mapping: dict[int, Binding | None]) -> dict[int, Binding | None]:
+    overrides: dict[int, Binding | None] = {}
     for note, default_binding in base_mapping.items():
         current_binding = mapping.get(note)
-        if current_binding is None:
+        if note not in mapping:
             continue
         if current_binding != default_binding:
             overrides[note] = current_binding
     return overrides
 
 
-def build_binding_to_notes(mapping: dict[int, Binding]) -> dict[Binding, tuple[int, ...]]:
+def build_binding_to_notes(mapping: dict[int, Binding | None]) -> dict[Binding, tuple[int, ...]]:
     grouped: dict[Binding, list[int]] = {}
     for note, binding in mapping.items():
-        grouped.setdefault(binding, []).append(note)
+        if binding is not None:
+            grouped.setdefault(binding, []).append(note)
     return {binding: tuple(notes) for binding, notes in grouped.items()}
 
 
@@ -396,7 +384,7 @@ def _binding_spec_to_binding(binding: BindingSpec) -> Binding:
 
 def get_mode_mapping(mode: PianoMode) -> dict[int, Binding]:
     midi_start, midi_end = MODE_RANGES[mode]
-    return {note: _binding_spec_to_binding(_MIDI_TO_BINDING_SPEC_88[note]) for note in range(midi_start, midi_end + 1)}
+    return {note: _default_physical_binding(_MIDI_TO_BINDING_SPEC_88[note]) for note in range(midi_start, midi_end + 1)}
 
 def get_note_labels(mode: PianoMode) -> dict[int, str]:
     midi_start, midi_end = MODE_RANGES[mode]
@@ -409,6 +397,8 @@ def is_black_key(midi_note: int) -> bool:
 
 def binding_to_label(binding: Binding) -> str:
     source, token, ctrl, shift, alt = binding
+    if source == "keyboard" and token.startswith("scan:"):
+        return _physical_binding_label(binding, compact=True)
     if source == "keyboard" and shift and not ctrl and not alt:
         if token in BASE_DIGIT_TO_SHIFTED_SYMBOL:
             return BASE_DIGIT_TO_SHIFTED_SYMBOL[token]
@@ -445,6 +435,8 @@ def binding_to_label(binding: Binding) -> str:
 
 def binding_to_inline_label(binding: Binding) -> str:
     source, token, ctrl, shift, alt = binding
+    if source == "keyboard" and token.startswith("scan:"):
+        return _physical_binding_label(binding, compact=False)
     if source == "keyboard":
         if token in BASE_DIGIT_TO_SHIFTED_SYMBOL and shift and not ctrl and not alt:
             return BASE_DIGIT_TO_SHIFTED_SYMBOL[token]
@@ -482,149 +474,6 @@ def normalize_mouse_binding(button: str, shift: bool, ctrl: bool, alt: bool) -> 
     )
 
 
-def normalize_key_event(text: str, key_name: str, shift: bool, ctrl: bool, alt: bool = False) -> Binding | None:
-    normalized_text = (text or "").strip()
-    normalized_key = (key_name or "").strip()
-    key_lower = normalized_key.lower()
-
-    if key_lower in MODIFIER_KEYNAMES:
-        return None
-
-    effective_shift = bool(shift)
-    token: str | None = None
-
-    if normalized_text in SHIFTED_DIGIT_SYMBOLS:
-        token = SHIFTED_DIGIT_SYMBOLS[normalized_text]
-        effective_shift = True
-    elif len(normalized_text) == 1 and normalized_text.isalpha():
-        token = normalized_text.lower()
-        effective_shift = normalized_text.isupper() or effective_shift
-    elif len(normalized_text) == 1 and normalized_text.isdigit():
-        token = normalized_text
-    elif key_lower in KEYNAME_TO_CHAR:
-        mapped = KEYNAME_TO_CHAR[key_lower]
-        if mapped in SHIFTED_DIGIT_SYMBOLS:
-            token = SHIFTED_DIGIT_SYMBOLS[mapped]
-            effective_shift = True
-    elif len(normalized_key) == 1 and normalized_key.isalnum():
-        token = normalized_key.lower()
-
-    if token is None:
-        return None
-
-    return _build_binding(
-        "keyboard",
-        token,
-        ctrl=bool(ctrl),
-        shift=bool(effective_shift),
-        alt=bool(alt),
-    )
-
-
-def normalize_key_event_qwerty_scancode(
-    native_scan_code: int,
-    *,
-    shift: bool,
-    ctrl: bool,
-    alt: bool = False,
-) -> Binding | None:
-    if sys.platform != "win32":
-        return None
-    scan = int(native_scan_code) & 0xFF
-    token = _QWERTY_SCANCODE_TO_TOKEN.get(scan)
-    if token is None:
-        return None
-    return _build_binding(
-        "keyboard",
-        token,
-        ctrl=bool(ctrl),
-        shift=bool(shift),
-        alt=bool(alt),
-    )
-
-
-def normalize_key_event_layout_scancode(
-    native_scan_code: int,
-    *,
-    shift: bool,
-    ctrl: bool,
-    alt: bool = False,
-) -> Binding | None:
-    if sys.platform != "win32":
-        return None
-    scan = int(native_scan_code) & 0xFF
-    qwerty_token = _QWERTY_SCANCODE_TO_TOKEN.get(scan)
-    if qwerty_token is None:
-        return None
-    localized = _localized_label_for_scancode(scan, fallback=qwerty_token)
-    layout_token = _normalize_layout_token_for_remap(localized) or qwerty_token
-    return _build_binding(
-        "keyboard",
-        layout_token,
-        ctrl=bool(ctrl),
-        shift=bool(shift),
-        alt=bool(alt),
-    )
-
-
-def remap_bindings_for_keyboard_mode(
-    bindings: dict[int, Binding],
-    target_mode: KeyboardInputMode,
-) -> dict[int, Binding]:
-    target = "qwerty" if str(target_mode or "").strip().lower() == "qwerty" else "layout"
-    qwerty_to_layout, layout_to_qwerty = _keyboard_mode_token_maps()
-    remapped: dict[int, Binding] = {}
-    for note, binding in bindings.items():
-        source, token, ctrl, shift, alt = binding
-        if source != "keyboard":
-            remapped[note] = binding
-            continue
-        if target == "layout":
-            mapped_token = qwerty_to_layout.get(token, token)
-        else:
-            mapped_token = layout_to_qwerty.get(token, token)
-        normalized_token = _normalize_keyboard_token(mapped_token) or token
-        normalized_binding = _build_binding(
-            "keyboard",
-            normalized_token,
-            ctrl=bool(ctrl),
-            shift=bool(shift),
-            alt=bool(alt),
-        )
-        remapped[note] = normalized_binding if normalized_binding is not None else binding
-    return remapped
-
-
-def qwerty_demo_rows() -> tuple[tuple[str, ...], ...]:
-    return KEYBOARD_DEMO_ROWS
-
-
-def current_layout_demo_rows() -> tuple[tuple[str, ...], ...]:
-    rows: list[tuple[str, ...]] = []
-    for row in KEYBOARD_DEMO_ROWS:
-        localized: list[str] = []
-        for token in row:
-            scan = _TOKEN_TO_QWERTY_SCANCODE.get(token)
-            if scan is None:
-                localized.append(token)
-                continue
-            localized.append(_localized_label_for_scancode(scan, fallback=token))
-        rows.append(tuple(localized))
-    return tuple(rows)
-
-
-def _keyboard_mode_token_maps() -> tuple[dict[str, str], dict[str, str]]:
-    qwerty_to_layout: dict[str, str] = {}
-    layout_to_qwerty: dict[str, str] = {}
-    for scan, qwerty_token in _QWERTY_SCANCODE_TO_TOKEN.items():
-        localized = _localized_label_for_scancode(scan, fallback=qwerty_token)
-        layout_token = _normalize_layout_token_for_remap(localized) or qwerty_token
-        qwerty_to_layout[qwerty_token] = layout_token
-        if layout_token not in layout_to_qwerty:
-            layout_to_qwerty[layout_token] = qwerty_token
-    return qwerty_to_layout, layout_to_qwerty
-
-
 def _normalize_layout_token_for_remap(value: str) -> str | None:
     text = str(value or "").strip()
     if len(text) != 1:
@@ -636,52 +485,237 @@ def _normalize_layout_token_for_remap(value: str) -> str | None:
 
 
 def _localized_label_for_scancode(scan_code: int, *, fallback: str) -> str:
-    scan = int(scan_code) & 0xFF
-    fallback_text = str(fallback or "").strip() or "?"
-    if scan <= 0:
-        return fallback_text
-    if not (sys.platform == "win32"):
-        return fallback_text
+    label = _windows_key_label(normalize_scan_code(scan_code), False, keyboard_layout_id())
+    return label.lower() if label and label.isalpha() else (label or fallback)
+
+
+_PHYSICAL_KEY_NAMES: dict[int, str] = {
+    **_QWERTY_SCANCODE_TO_TOKEN,
+    0x01: "Esc", 0x0C: "-", 0x0D: "=", 0x0E: "Backspace", 0x0F: "Tab",
+    0x1A: "[", 0x1B: "]", 0x1C: "Enter", 0x27: ";", 0x28: "'",
+    0x29: "`", 0x2B: "\\", 0x33: ",", 0x34: ".", 0x35: "/", 0x39: "Space",
+    **{scan: f"F{scan - 0x3A}" for scan in range(0x3B, 0x45)},
+    0x57: "F11", 0x58: "F12",
+    **{scan: f"F{scan - 0x57}" for scan in range(0x64, 0x70)},
+    0x37: "Num *", 0x47: "Num 7", 0x48: "Num 8", 0x49: "Num 9", 0x4A: "Num -",
+    0x4B: "Num 4", 0x4C: "Num 5", 0x4D: "Num 6", 0x4E: "Num +",
+    0x4F: "Num 1", 0x50: "Num 2", 0x51: "Num 3", 0x52: "Num 0", 0x53: "Num .",
+    0x56: "\\", 0x73: "\\", 0x7D: "?",
+    0xE01C: "Num Enter", 0xE035: "Num /",
+    0xE047: "Home", 0xE048: "Up", 0xE049: "Page Up", 0xE04B: "Left",
+    0xE04D: "Right", 0xE04F: "End", 0xE050: "Down", 0xE051: "Page Down",
+    0xE052: "Insert", 0xE053: "Delete", 0xE05B: "Windows", 0xE05C: "Windows",
+    0xE05D: "Menu",
+}
+_MODIFIER_SCANS = {0x1D, 0x2A, 0x36, 0x38, 0xE01D, 0xE038}
+_KEY_NAME_TO_SCAN = {name.lower(): scan for scan, name in _PHYSICAL_KEY_NAMES.items()}
+_KEY_NAME_TO_SCAN.update(_TOKEN_TO_QWERTY_SCANCODE)
+_KEY_NAME_TO_SCAN.update({"\\": 0x2B})
+_KEY_NAME_TO_SCAN.update({"return": 0x1C, "escape": 0x01, "backtab": 0x0F,
+                          "pageup": 0xE049, "pagedown": 0xE051, "del": 0xE053})
+_SHIFTED_PUNCTUATION = dict(zip("-=[];'`,./\\", '_+{}:"~<>?|'))
+_LABEL_CACHE: dict[tuple[int, bool], str] = {}
+_VIRTUAL_KEY_CACHE: dict[int, int] = {}
+_LABEL_LAYOUT: int | None = None
+
+
+def normalize_scan_code(value: int) -> int:
+    scan = int(value)
+    if 0x100 <= scan <= 0x1FF:
+        return 0xE000 | (scan & 0xFF)
+    if 0x200 <= scan <= 0x2FF:
+        return 0xE100 | (scan & 0xFF)
+    return scan if 0 < scan <= 0xFFFF else 0
+
+
+def physical_key_token(native_scan_code: int) -> str:
+    return f"scan:{normalize_scan_code(native_scan_code):04x}"
+
+
+def is_keypad_scan_code(native_scan_code: int) -> bool:
+    return _PHYSICAL_KEY_NAMES.get(normalize_scan_code(native_scan_code), "").startswith("Num ")
+
+
+def _default_physical_binding(spec: BindingSpec) -> Binding:
+    source, token, ctrl, shift, alt = _binding_spec_to_binding(spec)
+    return (source, physical_key_token(_TOKEN_TO_QWERTY_SCANCODE[token]), ctrl, shift, alt)
+
+
+def normalize_key_event_physical(
+    native_scan_code: int, *, shift: bool, ctrl: bool, alt: bool = False,
+    key_name: str = "", keypad: bool = False,
+) -> Binding | None:
+    scan = normalize_scan_code(native_scan_code)
+    if scan in _MODIFIER_SCANS:
+        return None
+    if scan == 0:
+        name = str(key_name or "").strip().lower()
+        if keypad:
+            name = {"end": "1", "down": "2", "pagedown": "3", "page down": "3",
+                    "left": "4", "clear": "5", "right": "6", "home": "7", "up": "8",
+                    "pageup": "9", "page up": "9", "insert": "0", "delete": ".",
+                    "return": "enter"}.get(name, name)
+            name = "num " + name
+        scan = _KEY_NAME_TO_SCAN.get(name, 0)
+    if scan not in _PHYSICAL_KEY_NAMES:
+        return None
+    return ("keyboard", physical_key_token(scan), bool(ctrl), bool(shift), bool(alt))
+
+
+def binding_reserved_reason(binding: Binding) -> str | None:
+    source, token, ctrl, _shift, alt = binding
+    if source != "keyboard" or not token.startswith("scan:"):
+        return None
+    scan = int(token[5:], 16)
+    if scan in {0xE05B, 0xE05C}:
+        return "The Windows key is reserved for system shortcuts."
+    if scan == 0xE053:
+        return "Delete clears the selected note's binding in the keybinding editor."
+    if scan == 0x39:
+        return "Space is reserved for sustain."
+    if scan in {0xE048, 0xE050, 0xE04B, 0xE04D}:
+        return "Arrow keys are reserved for volume and transposition."
+    if scan == 0x0F:
+        return "Tab is reserved for moving between controls."
+    if scan == 0x01:
+        return "Escape is reserved for closing or leaving controls."
+    if ctrl and not alt:
+        if not _LABEL_CACHE:
+            refresh_keyboard_labels()
+        if (_VIRTUAL_KEY_CACHE.get(scan) == 0x5A
+                or _LABEL_CACHE.get((scan, False), _PHYSICAL_KEY_NAMES.get(scan, "")).casefold() == "z"):
+            return "Ctrl+Z is reserved for undo in the keybinding editor."
+    if alt and scan in {0x3E, 0x0F, 0x01, 0x39}:
+        return "This combination is reserved for a Windows shortcut."
+    if ctrl and alt and scan == 0xE053:
+        return "This combination is reserved for Windows security."
+    return None
+
+
+@lru_cache(maxsize=1)
+def _keyboard_api():
+    if sys.platform != "win32":
+        return None
     try:
         import ctypes
-
         user32 = ctypes.windll.user32
-        map_vk = user32.MapVirtualKeyExW
-        map_vk.argtypes = [ctypes.c_uint, ctypes.c_uint, ctypes.c_void_p]
-        map_vk.restype = ctypes.c_uint
-        to_unicode = user32.ToUnicodeEx
-        to_unicode.argtypes = [
-            ctypes.c_uint,
-            ctypes.c_uint,
-            ctypes.POINTER(ctypes.c_ubyte),
-            ctypes.c_wchar_p,
-            ctypes.c_int,
-            ctypes.c_uint,
-            ctypes.c_void_p,
-        ]
-        to_unicode.restype = ctypes.c_int
-        get_layout = user32.GetKeyboardLayout
-        get_layout.argtypes = [ctypes.c_uint]
-        get_layout.restype = ctypes.c_void_p
+        signatures = {
+            "GetKeyboardLayout": ([ctypes.c_uint], ctypes.c_void_p),
+            "MapVirtualKeyExW": ([ctypes.c_uint, ctypes.c_uint, ctypes.c_void_p], ctypes.c_uint),
+            "ToUnicodeEx": ([ctypes.c_uint, ctypes.c_uint, ctypes.POINTER(ctypes.c_ubyte),
+                             ctypes.c_wchar_p, ctypes.c_int, ctypes.c_uint, ctypes.c_void_p], ctypes.c_int),
+            "VkKeyScanExW": ([ctypes.c_wchar, ctypes.c_void_p], ctypes.c_short),
+        }
+        for name, (args, result) in signatures.items():
+            fn = getattr(user32, name)
+            fn.argtypes, fn.restype = args, result
+        return user32
+    except (AttributeError, OSError):
+        return None
 
-        hkl = get_layout(0)
-        vk = int(map_vk(scan, 3, hkl))
-        if vk <= 0:
-            return fallback_text
 
+def keyboard_layout_id() -> int:
+    api = _keyboard_api()
+    return int(api.GetKeyboardLayout(0) or 0) if api is not None else 0
+
+
+def _windows_key_label(scan: int, shift: bool, layout: int) -> str | None:
+    api = _keyboard_api()
+    if api is None or not layout:
+        return None
+    try:
+        import ctypes
+        vk = api.MapVirtualKeyExW(scan, 3, layout)
+        if not vk:
+            return None
         state = (ctypes.c_ubyte * 256)()
+        if shift:
+            state[0x10] = 0x80
         buf = ctypes.create_unicode_buffer(8)
-        written = int(to_unicode(vk, scan, state, buf, len(buf), 0, hkl))
-        if written <= 0:
-            return fallback_text
-        text = str(buf.value[:written]).strip()
-        if not text:
-            return fallback_text
-        if len(text) > 1:
-            text = text[0]
-        if text.isalpha():
-            return text.lower()
+        written = int(api.ToUnicodeEx(vk, scan, state, buf, len(buf), 4, layout))
+        text = buf[:abs(written)]
+        if len(text) != 1 or not text.isprintable() or text.isspace():
+            return None
         return text
-    except Exception:
-        return fallback_text
+    except (AttributeError, OSError, ValueError):
+        return None
 
+
+def refresh_keyboard_labels(*, force: bool = False) -> bool:
+    global _LABEL_LAYOUT
+    layout = keyboard_layout_id()
+    if not force and _LABEL_LAYOUT == layout:
+        return False
+    labels: dict[tuple[int, bool], str] = {}
+    virtual_keys: dict[int, int] = {}
+    api = _keyboard_api()
+    for scan, fallback in _PHYSICAL_KEY_NAMES.items():
+        if api is not None and layout:
+            virtual_keys[scan] = int(api.MapVirtualKeyExW(scan, 3, layout))
+        for shift in (False, True):
+            if fallback.startswith("Num ") or len(fallback) != 1:
+                label = fallback
+            else:
+                label = _windows_key_label(scan, shift, layout)
+                if label is None:
+                    label = (_SHIFTED_PUNCTUATION.get(fallback, fallback.upper()) if shift else fallback)
+                    if shift and fallback in BASE_DIGIT_TO_SHIFTED_SYMBOL:
+                        label = BASE_DIGIT_TO_SHIFTED_SYMBOL[fallback]
+            labels[(scan, shift)] = label
+    _LABEL_CACHE.clear()
+    _LABEL_CACHE.update(labels)
+    _VIRTUAL_KEY_CACHE.clear()
+    _VIRTUAL_KEY_CACHE.update(virtual_keys)
+    _LABEL_LAYOUT = layout
+    return True
+
+
+def _physical_binding_label(binding: Binding, *, compact: bool) -> str:
+    _, token, ctrl, shift, alt = binding
+    scan = int(token[5:], 16)
+    if not _LABEL_CACHE:
+        refresh_keyboard_labels()
+    base = _LABEL_CACHE.get((scan, shift), _PHYSICAL_KEY_NAMES.get(scan, token))
+    plain = _LABEL_CACHE.get((scan, False), base)
+    if shift and not ctrl and not alt and base != plain and len(base) == 1:
+        return base
+    modifiers = []
+    if ctrl:
+        modifiers.append("C" if compact else "Ctrl")
+    if shift:
+        modifiers.append("S" if compact else "Shift")
+    if alt:
+        modifiers.append("A" if compact else "Alt")
+    if not modifiers:
+        return base
+    return f"{'/'.join(modifiers)}\n+\n{base}" if compact else " + ".join(modifiers + [base])
+
+
+def legacy_layout_scans() -> dict[str, int]:
+    scans: dict[str, int] = {}
+    for scan, fallback in _QWERTY_SCANCODE_TO_TOKEN.items():
+        localized = _localized_label_for_scancode(scan, fallback=fallback)
+        scans.setdefault(_normalize_layout_token_for_remap(localized) or fallback, scan)
+    return scans
+
+
+def legacy_binding_to_physical(
+    binding: Binding, keyboard_input_mode: str, *, layout_scans: dict[str, int] | None = None,
+) -> Binding:
+    source, token, ctrl, shift, alt = binding
+    if source != "keyboard" or token.startswith("scan:"):
+        return binding
+    scan = None
+    if str(keyboard_input_mode).lower() == "layout":
+        scan = (layout_scans if layout_scans is not None else legacy_layout_scans()).get(token)
+    if scan is None:
+        scan = _TOKEN_TO_QWERTY_SCANCODE.get(token)
+    if scan is None and len(token) == 1:
+        api = _keyboard_api()
+        if api is not None:
+            code = int(api.VkKeyScanExW(token, keyboard_layout_id()))
+            if code != -1:
+                scan = normalize_scan_code(api.MapVirtualKeyExW(code & 0xFF, 4, keyboard_layout_id()))
+    if scan not in _PHYSICAL_KEY_NAMES:
+        return binding
+    return (source, physical_key_token(scan), ctrl, shift, alt)

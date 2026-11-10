@@ -15,7 +15,8 @@ struct wasapi_output {
     void *render;
     unsigned int rate, periods, diagnostics;
     wchar_t *device_id;
-    HANDLE thread, stop, ready;
+    HANDLE thread, stop, ready, activate, stopped;
+    volatile LONG references, opening;
     HRESULT startup;
     LARGE_INTEGER frequency;
     volatile LONG running, error;
@@ -23,6 +24,20 @@ struct wasapi_output {
         refills, max_interval, mmcss, clock_position, clock_frequency,
         max_render, missed_padding, mix_rate;
 };
+
+static volatile LONG opening = 0;
+
+static void release(wasapi_output *state) {
+    if (InterlockedDecrement(&state->references) != 0) return;
+    if (state->thread) CloseHandle(state->thread);
+    if (state->stop) CloseHandle(state->stop);
+    if (state->ready) CloseHandle(state->ready);
+    if (state->activate) CloseHandle(state->activate);
+    if (state->stopped) CloseHandle(state->stopped);
+    if (state->opening) InterlockedExchange(&opening, 0);
+    free(state->device_id);
+    delete state;
+}
 
 static void maximum(volatile LONG64 *target, LONGLONG value) {
     LONGLONG old = InterlockedCompareExchange64(target, 0, 0);
@@ -122,7 +137,11 @@ static unsigned __stdcall run(void *argument) {
     }
     scheduling = AvSetMmThreadCharacteristicsW(L"Audio", &task);
     state->mmcss = scheduling ? 1 : 0;
-    result = fill(state, renderer, capacity, left, right);
+    {
+        BYTE *buffer = NULL;
+        result = renderer->GetBuffer(capacity, &buffer);
+        if (SUCCEEDED(result)) result = renderer->ReleaseBuffer(capacity, AUDCLNT_BUFFERFLAGS_SILENT);
+    }
     if (FAILED(result)) goto done;
     if (WaitForSingleObject(state->stop, 0) == WAIT_OBJECT_0) { result = E_ABORT; goto done; }
     result = client->Start();
@@ -130,7 +149,13 @@ static unsigned __stdcall run(void *argument) {
     started = true;
     state->startup = S_OK;
     InterlockedExchange(&state->running, 1);
+    state->opening = 0;
+    InterlockedExchange(&opening, 0);
     SetEvent(state->ready);
+    {
+        HANDLE activation[2] = {state->stop, state->activate};
+        if (WaitForMultipleObjects(2, activation, FALSE, INFINITE) != WAIT_OBJECT_0 + 1) goto done;
+    }
     for (;;) {
         HANDLE events[2] = {state->stop, event};
         DWORD wait = WaitForMultipleObjects(2, events, FALSE, 1000);
@@ -171,6 +196,13 @@ static unsigned __stdcall run(void *argument) {
 done:
     if (FAILED(result)) InterlockedExchange(&state->error, result);
     if (!started) state->startup = result;
+    if (state->opening) {
+        state->opening = 0;
+        InterlockedExchange(&opening, 0);
+    }
+    InterlockedExchange(&state->running, 0);
+    SetEvent(state->stopped);
+    SetEvent(state->ready);
     if (started) {
         HRESULT stopped = client->Stop();
         if (FAILED(stopped) && SUCCEEDED(result)) InterlockedExchange(&state->error, stopped);
@@ -185,33 +217,34 @@ done:
     if (event) CloseHandle(event);
     free(left); free(right);
     if (com) CoUninitialize();
-    InterlockedExchange(&state->running, 0);
-    SetEvent(state->ready);
+    release(state);
     return 0;
 }
 
 API void op_wasapi_stop(wasapi_output *state) {
     if (!state) return;
     if (state->stop) SetEvent(state->stop);
-    if (state->thread) WaitForSingleObject(state->thread, INFINITE);
+    if (state->thread) WaitForSingleObject(state->stopped, INFINITE);
 }
 
 API void op_wasapi_destroy(wasapi_output *state) {
     if (!state) return;
     op_wasapi_stop(state);
-    if (state->thread) CloseHandle(state->thread);
-    if (state->stop) CloseHandle(state->stop);
-    if (state->ready) CloseHandle(state->ready);
-    free(state->device_id);
-    delete state;
+    release(state);
 }
 
 API wasapi_output *op_wasapi_open(void *render, unsigned int rate, unsigned int periods,
                                 const wchar_t *device_id, unsigned int diagnostics, int32_t *error) {
     if (error) *error = E_INVALIDARG;
     if (!render || rate < 8000 || rate > 192000 || periods < 2 || periods > 16) return NULL;
+    if (InterlockedCompareExchange(&opening, 1, 0) != 0) {
+        if (error) *error = HRESULT_FROM_WIN32(ERROR_BUSY);
+        return NULL;
+    }
     wasapi_output *state = new (std::nothrow) wasapi_output();
-    if (!state) { if (error) *error = E_OUTOFMEMORY; return NULL; }
+    if (!state) { InterlockedExchange(&opening, 0); if (error) *error = E_OUTOFMEMORY; return NULL; }
+    state->references = 1;
+    state->opening = 1;
     state->render = render; state->rate = rate; state->periods = periods;
     state->diagnostics = diagnostics;
     state->startup = E_PENDING;
@@ -226,8 +259,13 @@ API wasapi_output *op_wasapi_open(void *render, unsigned int rate, unsigned int 
         op_wasapi_destroy(state); return NULL;
     }
     state->ready = CreateEventW(NULL, TRUE, FALSE, NULL);
-    if (state->ready)
+    state->activate = CreateEventW(NULL, TRUE, FALSE, NULL);
+    state->stopped = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (state->ready && state->activate && state->stopped) {
+        InterlockedIncrement(&state->references);
         state->thread = reinterpret_cast<HANDLE>(_beginthreadex(NULL, 0, run, state, 0, NULL));
+        if (!state->thread) release(state);
+    }
     if (!state->thread) {
         DWORD code = GetLastError();
         if (error) *error = HRESULT_FROM_WIN32(code ? code : ERROR_NOT_ENOUGH_MEMORY);
@@ -237,7 +275,12 @@ API wasapi_output *op_wasapi_open(void *render, unsigned int rate, unsigned int 
     HRESULT result = wait == WAIT_OBJECT_0 ? state->startup :
         (wait == WAIT_TIMEOUT ? HRESULT_FROM_WIN32(ERROR_TIMEOUT) : HRESULT_FROM_WIN32(GetLastError()));
     if (error) *error = result;
-    if (FAILED(result)) { op_wasapi_destroy(state); return NULL; }
+    if (FAILED(result)) {
+        SetEvent(state->stop);
+        release(state);
+        return NULL;
+    }
+    SetEvent(state->activate);
     return state;
 }
 

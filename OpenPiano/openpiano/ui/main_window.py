@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Callable
 from .update_dialog import get_update_dialog, ask_update_install_preference, ask_update_handoff
 from shiboken6 import isValid
 
-from PySide6.QtCore import QEvent, QEventLoop, QPoint, QPointF, QRect, QSize, Qt, Signal, QTimer
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QSize, Qt, Signal, QTimer
 from PySide6.QtGui import QColor, QGuiApplication, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -50,7 +50,6 @@ from openpiano.core.config import (
     UI_SCALE_STEP,
     normalize_piano_style,
 )
-from openpiano.core.keymap import current_layout_demo_rows, qwerty_demo_rows
 from openpiano.core.audio_levels import normalize_volume
 from openpiano.core.object_tree import is_descendant_of
 from openpiano.core.preset_families import FamilyPreset, default_family_catalog, default_preset_family
@@ -120,7 +119,7 @@ class MainWindow(QMainWindow):
     showKeyLabelsChanged = Signal(bool)
     showNoteLabelsChanged = Signal(bool)
     changeKeybindsRequested = Signal()
-    changeKeyboardLayoutRequested = Signal()
+    resetKeybindsRequested = Signal()
     doneKeybindsRequested = Signal()
     discardKeybindsRequested = Signal()
     keybindEditActionBlocked = Signal()
@@ -412,9 +411,12 @@ class MainWindow(QMainWindow):
         self.change_keybinds_button = QPushButton("Change Keybinds", self.keybind_row_widget)
         self.change_keybinds_button.setObjectName("actionButton")
         self.change_keybinds_button.clicked.connect(self.changeKeybindsRequested.emit)
-        self.change_layout_button = QPushButton("Change Layout", self.keybind_row_widget)
-        self.change_layout_button.setObjectName("actionButton")
-        self.change_layout_button.clicked.connect(self.changeKeyboardLayoutRequested.emit)
+        self.reset_keybinds_button = QPushButton("Reset Keybinds", self.keybind_row_widget)
+        self.reset_keybinds_button.setObjectName("actionButton")
+        self.reset_keybinds_button.setToolTip(
+            "Restore all 61- and 88-key bindings to their defaults. Choose Save to apply or Discard to cancel."
+        )
+        self.reset_keybinds_button.clicked.connect(self.resetKeybindsRequested.emit)
         self.save_keybinds_button = QPushButton("Save", self.keybind_row_widget)
         self.save_keybinds_button.setObjectName("actionButton")
         self.save_keybinds_button.clicked.connect(self.doneKeybindsRequested.emit)
@@ -425,16 +427,16 @@ class MainWindow(QMainWindow):
         self.discard_keybinds_button.setVisible(False)
         keybind_row.addWidget(keybind_label)
         keybind_row.addWidget(self.change_keybinds_button)
-        keybind_row.addWidget(self.change_layout_button)
         keybind_row.addWidget(self.save_keybinds_button)
         keybind_row.addWidget(self.discard_keybinds_button)
+        keybind_row.addWidget(self.reset_keybinds_button)
         keybind_row.addStretch(1)
         keyboard_layout.addWidget(self.keybind_row_widget)
 
         keybind_hint_row = QHBoxLayout()
         self._configure_settings_row(keybind_hint_row)
         keybind_hint_row.setContentsMargins(6, self._sp(0), 6, self._sp(3))
-        self.keybind_hint_label = QLabel("Customize keyboard and mouse triggers for piano keys.", self.keyboard_card)
+        self.keybind_hint_label = QLabel("Customize keyboard and mouse bindings. Key labels follow your Windows keyboard layout.", self.keyboard_card)
         self.keybind_hint_label.setObjectName("settingHint")
         self.keybind_hint_label.setWordWrap(True)
         self.keybind_hint_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
@@ -2278,234 +2280,6 @@ class MainWindow(QMainWindow):
         if dialog is not None:
             dialog.hide()
 
-    def _build_layout_demo_widget(self, rows: tuple[tuple[str, ...], ...], parent: QWidget) -> QWidget:
-        container = QWidget(parent)
-        container_layout = QVBoxLayout(container)
-        container_layout.setContentsMargins(0, 0, 0, 0)
-        container_layout.setSpacing(self._sp(4))
-        row_offsets = (self._sp(0), self._sp(10), self._sp(18), self._sp(26))
-        for index, row in enumerate(rows):
-            row_widget = QWidget(container)
-            row_layout = QHBoxLayout(row_widget)
-            row_layout.setContentsMargins(0, 0, 0, 0)
-            row_layout.setSpacing(self._sp(5))
-            row_layout.addSpacing(row_offsets[index] if index < len(row_offsets) else self._sp(26))
-            for token in row:
-                text = str(token or "?")
-                keycap = QLabel(text, row_widget)
-                keycap.setObjectName("layoutKeyCap")
-                keycap.setAlignment(Qt.AlignCenter)
-                width_units = max(1, min(3, len(text)))
-                keycap.setFixedSize(self._sp(22 + (width_units * 8)), self._sp(24))
-                row_layout.addWidget(keycap)
-            row_layout.addStretch(1)
-            container_layout.addWidget(row_widget)
-        container_layout.addStretch(1)
-        return container
-
-    def ask_keyboard_input_mode_choice(self) -> str | None:
-        root = self.centralWidget()
-        if root is None:
-            return None
-
-        qwerty_rows = qwerty_demo_rows()
-        layout_rows = current_layout_demo_rows()
-        choice: dict[str, str | None] = {"mode": None}
-
-        def _rgba_css(color: QColor) -> str:
-            return f"rgba({color.red()}, {color.green()}, {color.blue()}, {color.alpha()})"
-
-        if self._theme_mode == "light":
-            overlay_color = QColor(15, 20, 28, 140)
-            demo_card_color = QColor(self.theme.panel_bg)
-            demo_card_color.setAlpha(244)
-            side_card_color = QColor(self.theme.panel_bg).darker(103)
-            side_card_color.setAlpha(236)
-            keycap_color = QColor(self.theme.panel_bg).darker(110)
-            keycap_color.setAlpha(246)
-        else:
-            overlay_color = QColor(0, 0, 0, 212)
-            demo_card_color = QColor(self.theme.panel_bg)
-            demo_card_color.setAlpha(222)
-            side_card_color = QColor(self.theme.panel_bg).lighter(112)
-            side_card_color.setAlpha(214)
-            keycap_color = QColor(self.theme.panel_bg).lighter(135)
-            keycap_color.setAlpha(224)
-
-        overlay = QFrame(root)
-        overlay.setObjectName("keyboardLayoutChoiceOverlay")
-        overlay.setGeometry(root.rect())
-        overlay.setStyleSheet(
-            f"""
-            QFrame#keyboardLayoutChoiceOverlay {{
-                background: {_rgba_css(overlay_color)};
-            }}
-            QFrame#layoutDemoCard {{
-                background: {_rgba_css(demo_card_color)};
-                border: 2px solid {self.theme.border};
-                border-radius: {self._sp(12)}px;
-            }}
-            QFrame#layoutSideCard {{
-                background: {_rgba_css(side_card_color)};
-                border: 1px solid {self.theme.border};
-                border-radius: {self._sp(10)}px;
-            }}
-            QLabel#layoutOverlayTitle {{
-                color: {self.theme.text_primary};
-                font: 900 {self._sp(12)}pt "Segoe UI";
-            }}
-            QLabel#layoutOverlaySub {{
-                color: {self.theme.text_secondary};
-                font: 600 {self._sp(9)}pt "Segoe UI";
-            }}
-            QLabel#layoutSideTitle {{
-                color: {self.theme.text_primary};
-                font: 700 {self._sp(10)}pt "Segoe UI";
-            }}
-            QLabel#layoutSideSub {{
-                color: {self.theme.text_secondary};
-                font: 600 {self._sp(8)}pt "Segoe UI";
-            }}
-            QFrame#layoutVSplit {{
-                background: {self.theme.border};
-                min-width: 1px;
-                max-width: 1px;
-            }}
-            QLabel#layoutKeyCap {{
-                color: {self.theme.text_primary};
-                background: {_rgba_css(keycap_color)};
-                border: 1px solid {self.theme.border};
-                border-bottom: 2px solid {self.theme.accent_hover};
-                border-radius: {self._sp(6)}px;
-                font: 700 {self._sp(8)}pt "Consolas";
-                padding: 0px {self._sp(4)}px;
-            }}
-            QPushButton#layoutChoiceButton {{
-                background: {self.theme.panel_bg};
-                color: {self.theme.text_primary};
-                border: 1px solid {self.theme.border};
-                border-radius: {self._sp(7)}px;
-                padding: {self._sp(6)}px {self._sp(10)}px;
-                font: 700 {self._sp(9)}pt "Segoe UI";
-            }}
-            QPushButton#layoutChoiceButton:hover {{
-                background: {self.theme.accent};
-                border-color: {self.theme.accent_hover};
-            }}
-            """
-        )
-
-        piano_top_left = self.piano_widget.mapTo(root, QPoint(0, 0))
-        piano_rect = QRect(piano_top_left, self.piano_widget.size()).adjusted(6, 6, -6, -6)
-        if not piano_rect.isValid():
-            piano_rect = QRect(
-                self._sp(12),
-                self._sp(90),
-                max(self._sp(420), overlay.width() - self._sp(24)),
-                self._sp(220),
-            )
-        demo_top = max(self._sp(50), piano_rect.top() - self._sp(8))
-        demo_bottom = min(overlay.height() - self._sp(22), piano_rect.bottom() + self._sp(152))
-        min_demo_height = self._sp(312)
-        if demo_bottom - demo_top < min_demo_height:
-            demo_bottom = min(overlay.height() - self._sp(12), demo_top + min_demo_height)
-        demo_rect = QRect(piano_rect.left(), demo_top, piano_rect.width(), max(self._sp(240), demo_bottom - demo_top))
-
-        title = QLabel("Choose Keyboard Mapping", overlay)
-        title.setObjectName("layoutOverlayTitle")
-        title.adjustSize()
-        title_x = max(0, (overlay.width() - title.width()) // 2)
-        title_y = max(self._sp(10), demo_rect.top() - self._sp(42))
-        title.move(title_x, title_y)
-
-        demo = QFrame(overlay)
-        demo.setObjectName("layoutDemoCard")
-        demo.setGeometry(demo_rect)
-        demo_outer = QVBoxLayout(demo)
-        demo_outer.setContentsMargins(self._sp(14), self._sp(10), self._sp(14), self._sp(10))
-        demo_outer.setSpacing(self._sp(10))
-
-        split_layout = QHBoxLayout()
-        split_layout.setContentsMargins(0, 0, 0, 0)
-        split_layout.setSpacing(self._sp(12))
-
-        left = QFrame(demo)
-        left.setObjectName("layoutSideCard")
-        left_layout = QVBoxLayout(left)
-        left_layout.setContentsMargins(self._sp(10), self._sp(8), self._sp(10), self._sp(8))
-        left_layout.setSpacing(self._sp(7))
-        left_title = QLabel("QWERTY Layout", left)
-        left_title.setObjectName("layoutSideTitle")
-        left_sub = QLabel("Uses standard QWERTY layout", left)
-        left_sub.setObjectName("layoutSideSub")
-        left_preview = self._build_layout_demo_widget(qwerty_rows, left)
-        left_choose = QPushButton("Use QWERTY Layout", left)
-        left_choose.setObjectName("layoutChoiceButton")
-        left_choose.clicked.connect(lambda _checked=False: _set_choice("qwerty"))
-        left_layout.addWidget(left_title)
-        left_layout.addWidget(left_sub)
-        left_layout.addWidget(left_preview, 1)
-        left_layout.addWidget(left_choose, 0, Qt.AlignLeft)
-
-        v_split = QFrame(demo)
-        v_split.setObjectName("layoutVSplit")
-
-        right = QFrame(demo)
-        right.setObjectName("layoutSideCard")
-        right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(self._sp(10), self._sp(8), self._sp(10), self._sp(8))
-        right_layout.setSpacing(self._sp(7))
-        right_title = QLabel("Current Keyboard Layout", right)
-        right_title.setObjectName("layoutSideTitle")
-        right_sub = QLabel("Uses letters from your keyboard language", right)
-        right_sub.setObjectName("layoutSideSub")
-        right_preview = self._build_layout_demo_widget(layout_rows, right)
-        right_choose = QPushButton("Use Current Layout", right)
-        right_choose.setObjectName("layoutChoiceButton")
-        right_choose.clicked.connect(lambda _checked=False: _set_choice("layout"))
-        right_layout.addWidget(right_title)
-        right_layout.addWidget(right_sub)
-        right_layout.addWidget(right_preview, 1)
-        right_layout.addWidget(right_choose, 0, Qt.AlignLeft)
-
-        split_layout.addWidget(left, 1)
-        split_layout.addWidget(v_split)
-        split_layout.addWidget(right, 1)
-        demo_outer.addLayout(split_layout, 1)
-
-        cancel_row = QHBoxLayout()
-        cancel_row.setContentsMargins(0, 0, 0, 0)
-        cancel_row.setSpacing(self._sp(8))
-        cancel_row.addStretch(1)
-        cancel_button = QPushButton("Decide Later (Use Current Layout)", demo)
-        cancel_button.setObjectName("layoutChoiceButton")
-        cancel_row.addWidget(cancel_button)
-        cancel_row.addStretch(1)
-        demo_outer.addLayout(cancel_row)
-
-        loop = QEventLoop(self)
-
-        def _finish() -> None:
-            if loop.isRunning():
-                loop.quit()
-
-        def _set_choice(mode: str) -> None:
-            choice["mode"] = mode
-            _finish()
-
-        cancel_button.clicked.connect(lambda _checked=False: _finish())
-        overlay.destroyed.connect(_finish)
-
-        apply_dialog_button_cursors_util(overlay)
-        overlay.show()
-        overlay.raise_()
-        overlay.setFocus(Qt.ActiveWindowFocusReason)
-        loop.exec()
-        overlay.deleteLater()
-        self._restore_cursor_state_after_modal()
-        selected = choice["mode"]
-        return str(selected) if selected is not None else None
-
     def _apply_windows_title_bar_theme(self, target: QWidget | None = None) -> None:
         if sys.platform != "win32":
             return
@@ -2757,7 +2531,6 @@ class MainWindow(QMainWindow):
     def set_keybind_edit_mode(self, active: bool, status_text: str = "") -> None:
         self._keybind_edit_active = bool(active)
         self.change_keybinds_button.setVisible(not self._keybind_edit_active)
-        self.change_layout_button.setVisible(not self._keybind_edit_active)
         self.save_keybinds_button.setVisible(self._keybind_edit_active)
         self.save_keybinds_button.setEnabled(self._keybind_edit_active)
         self.discard_keybinds_button.setVisible(self._keybind_edit_active)
@@ -2765,7 +2538,7 @@ class MainWindow(QMainWindow):
         if self._keybind_edit_active:
             self.keybind_hint_label.setText(
                 status_text
-                or "Select a key on the piano, then press a keyboard combo or mouse combo. Press Save or Discard when finished. Ctrl+Z undoes the last change."
+                or "Select a piano key, then press a keyboard or mouse combination to assign it. Delete clears its binding. Ctrl+Z undoes the last change. Choose Save or Discard when finished."
             )
             self._sync_keybind_overlay()
             self._keybind_overlay.show()
@@ -2773,7 +2546,7 @@ class MainWindow(QMainWindow):
         else:
             self.keybind_hint_label.setText(
                 status_text
-                or "Customize keyboard and mouse triggers for piano keys."
+                or "Customize keyboard and mouse bindings. Key labels follow your Windows keyboard layout."
             )
             self._keybind_overlay.hide()
 
@@ -2955,6 +2728,7 @@ class MainWindow(QMainWindow):
             return
         self.settings_scroll.ensureWidgetVisible(target, 0, self._sp(18))
         self._sync_tutorial_overlay()
+        self._sync_keybind_overlay()
 
     def ensure_controls_target_visible(self, target: QWidget) -> None:
         if not is_descendant_of(target, self.controls_scroll):
