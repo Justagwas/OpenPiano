@@ -51,6 +51,8 @@ py -m pip install -r requirements.txt
 py OpenPiano.py
 ```
 
+On Linux, see "Running From Source on Linux" in `README.md`.
+
 ## Code Guidelines
 
 - Keep changes scoped.

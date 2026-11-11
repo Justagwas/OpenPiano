@@ -44,6 +44,9 @@ def _candidate_dll_names() -> tuple[str, ...]:
 
 
 def _find_local_fluidsynth_dll() -> Path | None:
+    # The bundled FluidSynth binaries are Windows DLLs; other platforms use the system library.
+    if sys.platform != "win32":
+        return None
     for directory in candidate_dll_dirs():
         for name in _candidate_dll_names():
             candidate = directory / name

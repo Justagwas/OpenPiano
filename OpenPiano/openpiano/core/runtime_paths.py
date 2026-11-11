@@ -31,7 +31,12 @@ def resource_root() -> Path:
 
 
 def app_local_data_dir(app_name: str) -> Path | None:
-    local_app_data = os.environ.get("LOCALAPPDATA")
+    if sys.platform == "win32":
+        local_app_data = os.environ.get("LOCALAPPDATA")
+    else:
+        # XDG Base Directory spec: $XDG_DATA_HOME, defaulting to ~/.local/share.
+        xdg_data_home = os.environ.get("XDG_DATA_HOME", "")
+        local_app_data = xdg_data_home if os.path.isabs(xdg_data_home) else str(Path.home() / ".local" / "share")
     if not local_app_data:
         return None
     return Path(local_app_data) / str(app_name or "").strip()

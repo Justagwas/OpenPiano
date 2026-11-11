@@ -110,7 +110,7 @@ Settings and user SoundFonts normally stay under `%LOCALAPPDATA%\OpenPiano`, inc
 
 ### Requirements
 
-- Windows (primary runtime target).
+- Windows (primary runtime target). Linux can run from source; see below.
 - Python 3.11 or later.
 - Dependencies in [`OpenPiano/requirements.txt`](https://github.com/Justagwas/OpenPiano/blob/main/OpenPiano/requirements.txt).
 
@@ -121,6 +121,20 @@ cd OpenPiano
 py -m pip install -r requirements.txt
 py OpenPiano.py
 ```
+
+### Running From Source on Linux
+
+```bash
+sudo apt install python3-venv libfluidsynth3 libxcb-cursor0
+cd OpenPiano
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/python OpenPiano.py
+```
+
+- Tested on Ubuntu 24.04 (Python 3.12, X11). If pip builds `python-rtmidi` from source, install `libasound2-dev` first.
+- Settings and SoundFonts are stored in `~/.local/share/OpenPiano`. The built-in SoundFonts are not in the repository; add an SF2/SF3 file to its `soundfonts` folder.
+- Not available on Linux: packaged builds, in-app updates, layout-aware key labels, and the native audio helper.
 
 ### Configuration Files
 

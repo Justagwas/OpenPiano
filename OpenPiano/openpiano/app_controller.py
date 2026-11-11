@@ -55,6 +55,7 @@ from openpiano.core.keymap import (
     normalize_mouse_binding,
     binding_reserved_reason,
     normalize_key_event_physical,
+    native_key_scan_code,
     normalize_scan_code,
     is_keypad_scan_code,
     refresh_keyboard_labels,
@@ -2113,11 +2114,11 @@ class PianoAppController(QObject):
 
     @staticmethod
     def _is_keypad_event(event: QKeyEvent) -> bool:
-        return bool(event.modifiers() & Qt.KeypadModifier) or is_keypad_scan_code(int(event.nativeScanCode()))
+        return bool(event.modifiers() & Qt.KeypadModifier) or is_keypad_scan_code(native_key_scan_code(event.nativeScanCode()))
 
     @staticmethod
     def _event_keycodes(event: QKeyEvent) -> tuple[int, ...]:
-        native = normalize_scan_code(int(event.nativeScanCode()))
+        native = normalize_scan_code(native_key_scan_code(event.nativeScanCode()))
         if native:
             return ((1 << 32) | native,)
         key = int(event.key())
@@ -2139,7 +2140,7 @@ class PianoAppController(QObject):
         modifiers = event.modifiers()
         if modifiers & Qt.MetaModifier:
             return None
-        native = int(event.nativeScanCode())
+        native = native_key_scan_code(event.nativeScanCode())
         if native:
             return normalize_key_event_physical(
                 native,
@@ -2164,7 +2165,7 @@ class PianoAppController(QObject):
         else:
             key_name = named_keys.get(key) or self._key_name_from_event(event)
         return normalize_key_event_physical(
-            int(event.nativeScanCode()),
+            native,
             shift=bool(modifiers & Qt.ShiftModifier),
             ctrl=bool(modifiers & Qt.ControlModifier),
             alt=bool(modifiers & Qt.AltModifier),

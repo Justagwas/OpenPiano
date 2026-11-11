@@ -528,6 +528,28 @@ def normalize_scan_code(value: int) -> int:
     return scan if 0 < scan <= 0xFFFF else 0
 
 
+# Linux evdev key codes whose PC set-1 scan code differs. Codes 1-88 are identical in both.
+_EVDEV_TO_SCAN_CODE: dict[int, int] = {
+    89: 0x73, 96: 0xE01C, 97: 0xE01D, 98: 0xE035, 100: 0xE038,
+    102: 0xE047, 103: 0xE048, 104: 0xE049, 105: 0xE04B, 106: 0xE04D,
+    107: 0xE04F, 108: 0xE050, 109: 0xE051, 110: 0xE052, 111: 0xE053,
+    124: 0x7D, 125: 0xE05B, 126: 0xE05C, 127: 0xE05D,
+    **{183 + offset: 0x64 + offset for offset in range(12)},
+}
+
+
+def native_key_scan_code(native_scan_code: int) -> int:
+    """Convert QKeyEvent.nativeScanCode() to the PC set-1 scan code used by key bindings."""
+    value = int(native_scan_code)
+    if sys.platform.startswith("linux"):
+        # Qt on X11 and Wayland reports XKB key codes, which are evdev key codes + 8.
+        evdev = value - 8
+        if 1 <= evdev <= 88:
+            return evdev
+        return _EVDEV_TO_SCAN_CODE.get(evdev, 0)
+    return value
+
+
 def physical_key_token(native_scan_code: int) -> str:
     return f"scan:{normalize_scan_code(native_scan_code):04x}"
 

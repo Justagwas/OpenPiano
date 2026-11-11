@@ -39,6 +39,7 @@ from openpiano.core.keymap import (
 )
 from openpiano.core.keybind_remap import migrate_legacy_keybinds
 from openpiano.core.normalize import clamp_float, clamp_int
+from openpiano.core.runtime_paths import app_local_data_dir
 from openpiano.core.audio_levels import normalize_volume
 
 SETTINGS_FILE_NAME = "OpenPiano_config.json"
@@ -82,9 +83,9 @@ class AppSettings:
 
 
 def _appdata_settings_dir() -> Path | None:
-    local_app_data = os.environ.get("LOCALAPPDATA")
-    if local_app_data:
-        return Path(local_app_data) / APP_NAME
+    local_data_dir = app_local_data_dir(APP_NAME)
+    if local_data_dir is not None:
+        return local_data_dir
     return Path(__file__).resolve().parents[2]
 
 
